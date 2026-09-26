@@ -1,0 +1,46 @@
+syntax = "proto3";
+
+package intel_hive;
+option go_package = "github.com/akhil92kolli-hub/Intel-Hive/gen/proto";
+
+message JobAssignment {
+  string job_id = 1;
+  string model_id = 2;
+  string shard_id = 3;
+  uint32 layer_start = 4;
+  uint32 layer_end = 5;
+  string previous_worker = 6;
+  string next_worker = 7;
+  uint32 timeout_ms = 8;
+}
+
+message JobAccepted {
+  string job_id = 1;
+  bool accepted = 2;
+  string reason = 3;
+}
+
+message ActivationPacket {
+  string job_id = 1;
+  uint64 sequence_id = 2;
+  uint32 layer = 3;
+  string dtype = 4;
+  repeated uint32 shape = 5;
+  bytes tensor_data = 6;
+  bytes sha256 = 7;
+}
+
+message JobComplete {
+  string job_id = 1;
+  string worker_id = 2;
+  uint64 sequence_id = 3;
+  uint32 processing_time_ms = 4;
+  string status = 5;
+}
+
+message JobFailed {
+  string job_id = 1;
+  string worker_id = 2;
+  string reason = 3;
+  string error_details = 4;
+}
