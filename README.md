@@ -1,13 +1,13 @@
 # Intel-Hive
 
-Distributed AI inference across Android devices.
+Distributed AI inference across Android and iOS devices.
 
 ## Phase 0
 
 Phase 0 proves the smallest useful path:
 
 ```text
-HTTP request → Go scheduler → Android workers → generated response
+HTTP request → Go scheduler → Android/iOS workers → generated response
 ```
 
 The scheduler operates on `ModelShard` objects rather than device identities. The initial target is a three-shard, LAN-only pipeline for a quantized GGUF model.
@@ -15,13 +15,23 @@ The scheduler operates on `ModelShard` objects rather than device identities. Th
 ## Repository layout
 
 - `android-worker/` — Kotlin Android worker and llama.cpp integration
+- `ios-worker/` — Swift iOS worker, scheduler transport, capabilities, and inference backend interface
 - `server/` — Go gateway, scheduler, registry, and job runtime
-- `proto/` — Protocol Buffer contracts
+- `proto/` — Protocol Buffer contracts shared by workers and server
 - `models/manifests/` — model and shard metadata
 - `benchmark/` — repeatable transport and inference measurements
 - `deployment/` — local Docker Compose services
 - `docs/` — architecture and protocol notes
 
+## iOS worker
+
+The iOS worker mirrors the Android registration and benchmark flow using Swift concurrency, URLSession WebSockets, CryptoKit, and Metal capability discovery. It reports `platform: "ios"` and `inference_backend: "metal"` when a Metal device is available. The llama.cpp/ggml Metal bridge is injected through the `InferenceBackend` protocol rather than vendored in this repository.
+
+```bash
+cd ios-worker
+swift test
+```
+
 ## First milestone
 
-T001 establishes the repository and protocol contracts. The next implementation step is the single-device Android benchmark, followed by activation transport between two workers.
+T001 establishes the repository and protocol contracts. The next implementation step is the single-device benchmark on Android and iOS, followed by activation transport between workers.
