@@ -1,0 +1,27 @@
+# Build artifacts and local state
+.gradle/
+build/
+.idea/
+*.iml
+*.apk
+*.aab
+
+# Go
+/bin/
+/dist/
+*.test
+*.out
+
+# Generated protobuf
+*.pb.go
+
+# Local configuration and data
+.env
+*.log
+*.sqlite
+models/*.gguf
+models/*.bin
+
+# OS
+.DS_Store
+Thumbs.db

@@ -1,0 +1,56 @@
+{
+  "model_id": "qwen2.5-3b-instruct",
+  "version": "1.0.0",
+  "format": "gguf",
+  "quantization": "Q4_K_M",
+  "architecture": "qwen2",
+  "layers": 30,
+  "hidden_size": 3072,
+  "vocab_size": 152064,
+  "max_context_tokens": 32768,
+  "context_for_phase0": "2048-4096",
+  "attention_heads": 24,
+  "attention_head_dim": 128,
+  "shards": [
+    {
+      "id": "qwen2.5-3b-instruct-s0",
+      "layer_start": 0,
+      "layer_end": 9,
+      "shard_index": 0,
+      "download_url": "https://huggingface.co/Qwen/Qwen2.5-3B-Instruct-GGUF/resolve/main/qwen2.5-3b-instruct-q4_k_m.gguf",
+      "sha256": "TBD",
+      "size_bytes": 2200000000
+    },
+    {
+      "id": "qwen2.5-3b-instruct-s1",
+      "layer_start": 10,
+      "layer_end": 19,
+      "shard_index": 1,
+      "download_url": "https://huggingface.co/Qwen/Qwen2.5-3B-Instruct-GGUF/resolve/main/qwen2.5-3b-instruct-q4_k_m.gguf",
+      "sha256": "TBD",
+      "size_bytes": 2200000000
+    },
+    {
+      "id": "qwen2.5-3b-instruct-s2",
+      "layer_start": 20,
+      "layer_end": 29,
+      "shard_index": 2,
+      "download_url": "https://huggingface.co/Qwen/Qwen2.5-3B-Instruct-GGUF/resolve/main/qwen2.5-3b-instruct-q4_k_m.gguf",
+      "sha256": "TBD",
+      "size_bytes": 2200000000
+    }
+  ],
+  "total_size_bytes": 2200000000,
+  "min_ram_mb": 4096,
+  "min_gpu_memory_mb": 1024,
+  "supported_backends": ["llama.cpp"],
+  "supported_gpu_vendors": ["Qualcomm", "Mali", "PowerVR", "Apple"],
+  "min_android_api": 28,
+  "recommended_android_api": 34,
+  "instructions": {
+    "vulkan": "Enabled for GPU acceleration",
+    "gpu_layers": 30,
+    "batch_size": 1,
+    "context_size": 4096
+  }
+}

@@ -1,0 +1,173 @@
+package main
+
+import (
+    "context"
+    "encoding/json"
+    "fmt"
+    "log"
+    "net/http"
+    "os"
+    "time"
+
+    "github.com/akhil92kolli-hub/Intel-Hive/server/internal/engines"
+    "github.com/akhil92kolli-hub/Intel-Hive/server/internal/protocol"
+    "github.com/akhil92kolli-hub/Intel-Hive/server/internal/registry"
+    "github.com/akhil92kolli-hub/Intel-Hive/server/internal/scheduler"
+    "github.com/google/uuid"
+    "github.com/gorilla/websocket"
+)
+
+var upgrader = websocket.Upgrader{
+    ReadBufferSize:  1024,
+    WriteBufferSize: 1024,
+    CheckOrigin: func(r *http.Request) bool { return true },
+}
+
+func main() {
+    if err := run(); err != nil {
+        log.Fatal(err)
+    }
+}
+
+func run() error {
+    engineFactoryRegistry := engines.Registry()
+    if len(engineFactoryRegistry) == 0 {
+        return fmt.Errorf("no inference engines registered")
+    }
+
+    workerRegistry := registry.NewWorkerRegistry()
+    modelRegistry := registry.NewModelRegistry()
+    jobManager := scheduler.NewJobManager()
+    sched := scheduler.NewScheduler(workerRegistry, modelRegistry, jobManager)
+
+    http.HandleFunc("/health", healthHandler)
+    http.HandleFunc("/api/generate", func(w http.ResponseWriter, r *http.Request) {
+        generateHandler(sched, w, r)
+    })
+    http.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
+        handleWorkerSocket(workerRegistry, sched, w, r)
+    })
+
+    addr := os.Getenv("LISTEN_ADDR")
+    if addr == "" {
+        addr = ":8080"
+    }
+    log.Printf("scheduler listening on %s", addr)
+    return http.ListenAndServe(addr, nil)
+}
+
+func healthHandler(w http.ResponseWriter, r *http.Request) {
+    w.Header().Set("Content-Type", "application/json")
+    _ = json.NewEncoder(w).Encode(map[string]any{
+        "status": "ok",
+        "protocol": "phase-0-v1",
+        "timestamp": time.Now().UTC().Format(time.RFC3339),
+    })
+}
+
+func generateHandler(sched *scheduler.Scheduler, w http.ResponseWriter, r *http.Request) {
+    if r.Method != http.MethodPost {
+        http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+        return
+    }
+
+    var req protocol.GenerateRequest
+    if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+        http.Error(w, err.Error(), http.StatusBadRequest)
+        return
+    }
+    if req.ModelID == "" {
+        req.ModelID = "qwen2.5-3b-instruct"
+    }
+    if req.MaxTokens == 0 {
+        req.MaxTokens = 64
+    }
+
+    response, err := sched.HandleGenerate(context.Background(), req)
+    if err != nil {
+        http.Error(w, err.Error(), http.StatusInternalServerError)
+        return
+    }
+
+    w.Header().Set("Content-Type", "application/json")
+    _ = json.NewEncoder(w).Encode(response)
+}
+
+func handleWorkerSocket(workerRegistry *registry.WorkerRegistry, sched *scheduler.Scheduler, w http.ResponseWriter, r *http.Request) {
+    conn, err := upgrader.Upgrade(w, r, nil)
+    if err != nil {
+        log.Printf("upgrade error: %v", err)
+        return
+    }
+    defer conn.Close()
+
+    for {
+        _, message, err := conn.ReadMessage()
+        if err != nil {
+            log.Printf("read error: %v", err)
+            return
+        }
+
+        var msg map[string]any
+        if err := json.Unmarshal(message, &msg); err != nil {
+            log.Printf("invalid message: %v", err)
+            continue
+        }
+
+        switch msg["type"] {
+        case "register":
+            var reg protocol.WorkerRegister
+            if err := json.Unmarshal(message, &reg); err != nil {
+                log.Printf("register decode error: %v", err)
+                continue
+            }
+            reg.ProtocolVersion = protocol.ProtocolVersion
+            workerRegistry.Register(reg, conn)
+            if err := conn.WriteJSON(protocol.WorkerRegisterAck{
+                Accepted: true,
+                WorkerToken: uuid.NewString(),
+                HeartbeatIntervalSeconds: 5,
+            }); err != nil {
+                log.Printf("ack write error: %v", err)
+                return
+            }
+        case "heartbeat":
+            var hb protocol.Heartbeat
+            if err := json.Unmarshal(message, &hb); err != nil {
+                log.Printf("heartbeat decode error: %v", err)
+                continue
+            }
+            workerRegistry.UpdateHeartbeat(hb)
+        case "model_ready":
+            var ready protocol.ModelReady
+            if err := json.Unmarshal(message, &ready); err != nil {
+                log.Printf("model ready decode error: %v", err)
+                continue
+            }
+            workerRegistry.MarkModelReady(ready)
+        case "job_accept":
+            var accept protocol.JobAccepted
+            if err := json.Unmarshal(message, &accept); err != nil {
+                log.Printf("job accept decode error: %v", err)
+                continue
+            }
+            sched.MarkAccepted(accept)
+        case "job_failed":
+            var fail protocol.JobFailed
+            if err := json.Unmarshal(message, &fail); err != nil {
+                log.Printf("job failed decode error: %v", err)
+                continue
+            }
+            sched.MarkFailed(fail)
+        case "job_complete":
+            var complete protocol.JobComplete
+            if err := json.Unmarshal(message, &complete); err != nil {
+                log.Printf("job complete decode error: %v", err)
+                continue
+            }
+            sched.MarkComplete(complete)
+        default:
+            log.Printf("unknown worker message type: %s", msg["type"])
+        }
+    }
+}

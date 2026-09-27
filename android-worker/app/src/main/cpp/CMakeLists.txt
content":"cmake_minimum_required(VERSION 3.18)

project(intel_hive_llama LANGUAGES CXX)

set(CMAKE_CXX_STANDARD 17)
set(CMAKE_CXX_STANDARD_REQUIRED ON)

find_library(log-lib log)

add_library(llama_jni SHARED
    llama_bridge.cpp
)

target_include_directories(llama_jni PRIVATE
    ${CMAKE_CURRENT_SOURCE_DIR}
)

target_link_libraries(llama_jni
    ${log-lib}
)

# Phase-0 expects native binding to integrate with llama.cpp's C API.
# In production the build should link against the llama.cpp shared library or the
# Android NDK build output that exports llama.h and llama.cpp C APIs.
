@@ -1,0 +1,9 @@
+package engines
+
+import "github.com/akhil92kolli-hub/Intel-Hive/server/internal/engines/llamacpp"
+
+func init() {
+    Register("llama.cpp", func() Engine {
+        return llamacpp.New()
+    })
+}

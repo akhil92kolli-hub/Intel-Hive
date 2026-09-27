@@ -1,0 +1,13 @@
+{
+  "model_id": "qwen2.5-3b",
+  "architecture": "qwen2",
+  "parameter_count": 3000000000,
+  "context_length": 32768,
+  "embedding_length": 3072,
+  "layer_count": 36,
+  "attention_heads": 24,
+  "kv_heads": 8,
+  "vocab_size": 152064,
+  "tensor_count": 512,
+  "quantization": "Q4_K_M"
+}

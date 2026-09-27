@@ -1,0 +1,111 @@
+package registry
+
+import (
+    "sync"
+    "time"
+
+    "github.com/akhil92kolli-hub/Intel-Hive/server/internal/protocol"
+    "github.com/gorilla/websocket"
+)
+
+type WorkerInfo struct {
+    WorkerID   string
+    Token      string
+    LastSeen   time.Time
+    Healthy    bool
+    Conn       *websocket.Conn
+    Capabilities map[string]any
+    ReadyModel string
+    ReadyShard string
+}
+
+type WorkerRegistry struct {
+    mu      sync.RWMutex
+    workers map[string]*WorkerInfo
+}
+
+func NewWorkerRegistry() *WorkerRegistry {
+    return &WorkerRegistry{workers: map[string]*WorkerInfo{}}
+}
+
+func (r *WorkerRegistry) Register(reg protocol.WorkerRegister, conn *websocket.Conn) {
+    r.mu.Lock()
+    defer r.mu.Unlock()
+    r.workers[reg.WorkerID] = &WorkerInfo{
+        WorkerID:     reg.WorkerID,
+        LastSeen:     time.Now().UTC(),
+        Healthy:      true,
+        Conn:         conn,
+        Capabilities: map[string]any{
+            "backend": reg.InferenceBackend,
+            "gpu":     reg.GPUName,
+            "ram_mb":  reg.RAMMB,
+            "score":   reg.BenchmarkScore,
+        },
+    }
+}
+
+func (r *WorkerRegistry) UpdateHeartbeat(hb protocol.Heartbeat) {
+    r.mu.Lock()
+    defer r.mu.Unlock()
+    if worker, ok := r.workers[hb.WorkerID]; ok {
+        worker.LastSeen = time.Now().UTC()
+        worker.Healthy = true
+    }
+}
+
+func (r *WorkerRegistry) MarkModelReady(ready protocol.ModelReady) {
+    r.mu.Lock()
+    defer r.mu.Unlock()
+    if worker, ok := r.workers[ready.WorkerID]; ok {
+        worker.ReadyModel = ready.ModelID
+        worker.ReadyShard = ready.ShardID
+    }
+}
+
+func (r *WorkerRegistry) AvailableWorkersForModel(modelID string, shardID string) []*WorkerInfo {
+    r.mu.RLock()
+    defer r.mu.RUnlock()
+    out := make([]*WorkerInfo, 0)
+    for _, w := range r.workers {
+        if !w.Healthy {
+            continue
+        }
+        if w.ReadyModel == modelID && w.ReadyShard == shardID {
+            out = append(out, w)
+        }
+    }
+    return out
+}
+
+type ModelRegistry struct {
+    mu     sync.RWMutex
+    models map[string]protocol.ModelManifest
+}
+
+func NewModelRegistry() *ModelRegistry {
+    return &ModelRegistry{models: map[string]protocol.ModelManifest{}}
+}
+
+func (r *ModelRegistry) Register(manifest protocol.ModelManifest) {
+    r.mu.Lock()
+    defer r.mu.Unlock()
+    r.models[manifest.ModelID] = manifest
+}
+
+func (r *ModelRegistry) Get(modelID string) (protocol.ModelManifest, bool) {
+    r.mu.RLock()
+    defer r.mu.RUnlock()
+    m, ok := r.models[modelID]
+    return m, ok
+}
+
+func (r *ModelRegistry) RequiredShards(modelID string) ([]protocol.ModelShard, bool) {
+    r.mu.RLock()
+    defer r.mu.RUnlock()
+    m, ok := r.models[modelID]
+    if !ok {
+        return nil, false
+    }
+    return m.Shards, true
+}
