@@ -1,0 +1,252 @@
+package main
+
+import (
+    "context"
+    "encoding/json"
+    "fmt"
+    "log"
+    "net/http"
+    "os"
+    "time"
+
+    "github.com/akhil92kolli-hub/Intel-Hive/server/internal/protocol"
+    "github.com/akhil92kolli-hub/Intel-Hive/server/internal/registry"
+    "github.com/akhil92kolli-hub/Intel-Hive/server/internal/scheduler"
+    "github.com/google/uuid"
+    "github.com/gorilla/websocket"
+)
+
+var upgrader = websocket.Upgrader{
+    ReadBufferSize:  1024,
+    WriteBufferSize: 1024,
+    CheckOrigin:     func(r *http.Request) bool { return true },
+}
+
+func main() {
+    if err := run(); err != nil {
+        log.Fatal(err)
+    }
+}
+
+func run() error {
+    workerRegistry := registry.NewWorkerRegistry()
+    modelRegistry := registry.NewModelRegistry()
+    jobManager := scheduler.NewJobManager()
+    sched := scheduler.NewScheduler(workerRegistry, modelRegistry, jobManager)
+
+    http.HandleFunc("/health", healthHandler)
+    http.HandleFunc("/api/workers", func(w http.ResponseWriter, r *http.Request) {
+        listWorkersHandler(workerRegistry, w, r)
+    })
+    http.HandleFunc("/api/generate", func(w http.ResponseWriter, r *http.Request) {
+        generateHandler(sched, w, r)
+    })
+    http.HandleFunc("/ws/worker", func(w http.ResponseWriter, r *http.Request) {
+        handleWorkerSocket(workerRegistry, sched, w, r)
+    })
+
+    addr := os.Getenv("LISTEN_ADDR")
+    if addr == "" {
+        addr = ":8080"
+    }
+    log.Printf("scheduler listening on %s", addr)
+    return http.ListenAndServe(addr, nil)
+}
+
+func healthHandler(w http.ResponseWriter, r *http.Request) {
+    w.Header().Set("Content-Type", "application/json")
+    _ = json.NewEncoder(w).Encode(map[string]any{
+        "status":   "ok",
+        "protocol": protocol.ProtocolVersion,
+        "timestamp": time.Now().UTC().Format(time.RFC3339),
+    })
+}
+
+func listWorkersHandler(workerRegistry *registry.WorkerRegistry, w http.ResponseWriter, r *http.Request) {
+    if r.Method != http.MethodGet {
+        http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+        return
+    }
+    workers := workerRegistry.ListWorkers()
+    w.Header().Set("Content-Type", "application/json")
+    _ = json.NewEncoder(w).Encode(map[string]any{
+        "workers": workers,
+        "count":   len(workers),
+    })
+}
+
+func generateHandler(sched *scheduler.Scheduler, w http.ResponseWriter, r *http.Request) {
+    if r.Method != http.MethodPost {
+        http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+        return
+    }
+
+    var req protocol.GenerateRequest
+    if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+        http.Error(w, err.Error(), http.StatusBadRequest)
+        return
+    }
+
+    response, err := sched.HandleGenerate(context.Background(), req)
+    if err != nil {
+        http.Error(w, err.Error(), http.StatusInternalServerError)
+        return
+    }
+
+    w.Header().Set("Content-Type", "application/json")
+    _ = json.NewEncoder(w).Encode(response)
+}
+
+func handleWorkerSocket(workerRegistry *registry.WorkerRegistry, sched *scheduler.Scheduler, w http.ResponseWriter, r *http.Request) {
+    conn, err := upgrader.Upgrade(w, r, nil)
+    if err != nil {
+        log.Printf("websocket upgrade error: %v", err)
+        return
+    }
+    defer conn.Close()
+
+    log.Printf("new worker connection from %s", r.RemoteAddr)
+
+    for {
+        var message map[string]interface{}
+        if err := conn.ReadJSON(&message); err != nil {
+            log.Printf("read error: %v", err)
+            return
+        }
+
+        msgType, ok := message["type"].(string)
+        if !ok {
+            log.Printf("invalid message: missing type")
+            continue
+        }
+
+        switch msgType {
+        case "register":
+            handleWorkerRegister(conn, workerRegistry, message)
+
+        case "heartbeat":
+            handleHeartbeat(conn, workerRegistry, message)
+
+        case "benchmark_result":
+            handleBenchmarkResult(conn, workerRegistry, message)
+
+        default:
+            log.Printf("unknown message type: %s", msgType)
+        }
+    }
+}
+
+func handleWorkerRegister(conn *websocket.Conn, workerRegistry *registry.WorkerRegistry, message map[string]interface{}) {
+    data, _ := json.Marshal(message)
+    var req protocol.WorkerRegisterRequest
+    if err := json.Unmarshal(data, &req); err != nil {
+        log.Printf("register decode error: %v", err)
+        _ = conn.WriteJSON(map[string]any{
+            "accepted": false,
+            "reason":   err.Error(),
+        })
+        return
+    }
+
+    // Construct platform-independent Worker
+    worker := &registry.Worker{
+        ID:       req.WorkerID,
+        Platform: req.Platform,
+        State:    registry.StateRegistered,
+        Identity: registry.WorkerIdentity{
+            DeviceID:  req.DeviceID,
+            PublicKey: req.DevicePublicKey,
+        },
+        Hardware: registry.HardwareCapabilities{
+            Architecture: "unknown",
+            RAMMB:        req.Memory.TotalMB,
+        },
+        Runtime: registry.RuntimeCapabilities{
+            Name:     req.Inference.Runtime,
+            Backends: []string{req.Inference.Backend},
+        },
+        Inference: registry.InferenceCapabilities{
+            Runtime:        req.Inference.Runtime,
+            Backend:        req.Inference.Backend,
+            BenchmarkStatus: req.Inference.BenchmarkStatus,
+        },
+        Network: registry.NetworkCapabilities{
+            Type: req.Network.Type,
+        },
+        Power: registry.PowerState{
+            BatteryPercent: req.Power.BatteryPercent,
+            Charging:       req.Power.Charging,
+        },
+        Health: registry.HealthStatus{
+            Healthy:           true,
+            LastHeartbeatTime: time.Now().UTC(),
+        },
+    }
+
+    // Determine state based on benchmark status
+    if req.Inference.BenchmarkStatus == "COMPLETED" {
+        worker.State = registry.StateReady
+        worker.Inference.Performance = &registry.BenchmarkInfo{
+            Status:          "COMPLETED",
+            TokensPerSecond: req.Inference.Performance.TokensPerSecond,
+        }
+    } else if req.Inference.BenchmarkStatus == "NOT_RUN" {
+        worker.State = registry.StateUnbenchmarked
+    }
+
+    workerRegistry.RegisterOrUpdate(worker)
+
+    response := protocol.WorkerRegisterResponse{
+        Accepted:                 true,
+        WorkerID:                 req.WorkerID,
+        WorkerToken:              uuid.NewString(),
+        HeartbeatIntervalSeconds: 5,
+        State:                    string(worker.State),
+    }
+
+    if err := conn.WriteJSON(response); err != nil {
+        log.Printf("response write error: %v", err)
+        return
+    }
+
+    log.Printf("registered worker %s (platform=%s, state=%s)", req.WorkerID, req.Platform, worker.State)
+}
+
+func handleHeartbeat(conn *websocket.Conn, workerRegistry *registry.WorkerRegistry, message map[string]interface{}) {
+    data, _ := json.Marshal(message)
+    var hb protocol.Heartbeat
+    if err := json.Unmarshal(data, &hb); err != nil {
+        log.Printf("heartbeat decode error: %v", err)
+        return
+    }
+
+    workerRegistry.UpdateHeartbeat(hb.WorkerID)
+
+    response := protocol.HeartbeatResponse{
+        WorkerID: hb.WorkerID,
+        Ack:      true,
+    }
+    _ = conn.WriteJSON(response)
+}
+
+func handleBenchmarkResult(conn *websocket.Conn, workerRegistry *registry.WorkerRegistry, message map[string]interface{}) {
+    data, _ := json.Marshal(message)
+    var result protocol.BenchmarkResult
+    if err := json.Unmarshal(data, &result); err != nil {
+        log.Printf("benchmark result decode error: %v", err)
+        return
+    }
+
+    if w, ok := workerRegistry.GetWorker(result.WorkerID); ok {
+        if result.Status == "COMPLETED" {
+            w.Inference.BenchmarkStatus = "COMPLETED"
+            w.Inference.Performance = &registry.BenchmarkInfo{
+                Status:          "COMPLETED",
+                TokensPerSecond: result.TokensPerSecond,
+                LastRunTime:     time.Now().UTC(),
+            }
+            w.State = registry.StateReady
+            log.Printf("worker %s benchmark complete: %.2f tok/s", result.WorkerID, result.TokensPerSecond)
+        }
+    }
+}
