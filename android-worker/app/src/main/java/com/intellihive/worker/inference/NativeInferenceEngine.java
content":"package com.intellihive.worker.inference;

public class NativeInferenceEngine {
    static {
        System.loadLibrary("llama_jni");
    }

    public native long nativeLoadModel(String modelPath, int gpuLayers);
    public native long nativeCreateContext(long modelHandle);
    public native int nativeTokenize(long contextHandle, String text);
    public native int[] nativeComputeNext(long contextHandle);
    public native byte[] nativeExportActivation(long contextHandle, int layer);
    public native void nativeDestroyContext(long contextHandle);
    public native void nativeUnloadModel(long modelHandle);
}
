@@ -1,0 +1,122 @@
+#include <jni.h>
+#include <android/log.h>
+#include <string>
+#include <vector>
+
+#define LOG_TAG "llama_bridge"
+#define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
+#define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
+
+extern "C" {
+
+static jlong g_model_handle = 0;
+static jlong g_context_handle = 0;
+
+JNIEXPORT jlong JNICALL
+Java_com_intellihive_worker_inference_NativeInferenceEngine_nativeLoadModel(
+    JNIEnv* env,
+    jobject /*thiz*/,
+    jstring model_path,
+    jint gpu_layers) {
+    const char* path = env->GetStringUTFChars(model_path, nullptr);
+    std::string modelPath(path);
+    env->ReleaseStringUTFChars(model_path, path);
+
+    LOGI("Loading model: %s with gpu_layers=%d", modelPath.c_str(), gpu_layers);
+
+    // Phase-0 stub: in a real native build, this would call llama_model_load_from_file()
+    // and return a pointer-backed handle. This keeps the integration boundary explicit.
+    g_model_handle = 1;
+    return g_model_handle;
+}
+
+JNIEXPORT jlong JNICALL
+Java_com_intellihive_worker_inference_NativeInferenceEngine_nativeCreateContext(
+    JNIEnv* /*env*/,
+    jobject /*thiz*/,
+    jlong model_handle) {
+    if (model_handle == 0) {
+        return 0;
+    }
+    LOGI("Creating llama context from model handle=%lld", model_handle);
+    g_context_handle = 2;
+    return g_context_handle;
+}
+
+JNIEXPORT jint JNICALL
+Java_com_intellihive_worker_inference_NativeInferenceEngine_nativeTokenize(
+    JNIEnv* env,
+    jobject /*thiz*/,
+    jlong context_handle,
+    jstring text) {
+    if (context_handle == 0) {
+        return -1;
+    }
+    const char* s = env->GetStringUTFChars(text, nullptr);
+    std::string sample(s);
+    env->ReleaseStringUTFChars(text, s);
+    LOGI("Tokenization request: %s", sample.c_str());
+    return 128;
+}
+
+JNIEXPORT jintArray JNICALL
+Java_com_intellihive_worker_inference_NativeInferenceEngine_nativeComputeNext(
+    JNIEnv* env,
+    jobject /*thiz*/,
+    jlong context_handle) {
+    if (context_handle == 0) {
+        return nullptr;
+    }
+    jint values[4] = {1, 2, 3, 4};
+    jintArray result = env->NewIntArray(4);
+    if (result == nullptr) {
+        return nullptr;
+    }
+    env->SetIntArrayRegion(result, 0, 4, values);
+    return result;
+}
+
+JNIEXPORT jbyteArray JNICALL
+Java_com_intellihive_worker_inference_NativeInferenceEngine_nativeExportActivation(
+    JNIEnv* env,
+    jobject /*thiz*/,
+    jlong context_handle,
+    jint layer) {
+    if (context_handle == 0) {
+        return nullptr;
+    }
+    std::vector<jbyte> tensor = {0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07};
+    jbyteArray out = env->NewByteArray(static_cast<jsize>(tensor.size()));
+    if (out == nullptr) {
+        return nullptr;
+    }
+    env->SetByteArrayRegion(out, 0, static_cast<jsize>(tensor.size()), tensor.data());
+    LOGI("ExportActivation layer=%d size=%zu", layer, tensor.size());
+    return out;
+}
+
+JNIEXPORT void JNICALL
+Java_com_intellihive_worker_inference_NativeInferenceEngine_nativeDestroyContext(
+    JNIEnv* /*env*/,
+    jobject /*thiz*/,
+    jlong context_handle) {
+    if (context_handle == 0) {
+        return;
+    }
+    LOGI("Destroying llama context=%lld", context_handle);
+    g_context_handle = 0;
+}
+
+JNIEXPORT void JNICALL
+Java_com_intellihive_worker_inference_NativeInferenceEngine_nativeUnloadModel(
+    JNIEnv* /*env*/,
+    jobject /*thiz*/,
+    jlong model_handle) {
+    if (model_handle == 0) {
+        return;
+    }
+    LOGI("Unloading model=%lld", model_handle);
+    g_model_handle = 0;
+}
+
+} // extern "C"

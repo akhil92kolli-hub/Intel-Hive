@@ -1,0 +1,94 @@
+package scheduler
+
+import (
+    "context"
+    "fmt"
+    "sort"
+    "time"
+
+    "github.com/akhil92kolli-hub/Intel-Hive/server/internal/protocol"
+    "github.com/akhil92kolli-hub/Intel-Hive/server/internal/registry"
+    "github.com/google/uuid"
+)
+
+type Scheduler struct {
+    workers *registry.WorkerRegistry
+    models  *registry.ModelRegistry
+    jobs    *JobManager
+}
+
+func NewScheduler(workers *registry.WorkerRegistry, models *registry.ModelRegistry, jobs *JobManager) *Scheduler {
+    return &Scheduler{workers: workers, models: models, jobs: jobs}
+}
+
+func (s *Scheduler) HandleGenerate(ctx context.Context, req protocol.GenerateRequest) (protocol.GenerateResponse, error) {
+    shards, ok := s.models.RequiredShards(req.ModelID)
+    if !ok {
+        return protocol.GenerateResponse{}, fmt.Errorf("model not registered: %s", req.ModelID)
+    }
+    if len(shards) == 0 {
+        return protocol.GenerateResponse{}, fmt.Errorf("no shards for model: %s", req.ModelID)
+    }
+
+    pipeline := make([]string, 0, len(shards))
+    for _, shard := range shards {
+        candidates := s.workers.AvailableWorkersForModel(req.ModelID, shard.ID)
+        if len(candidates) == 0 {
+            return protocol.GenerateResponse{}, fmt.Errorf("no capacity for shard %s", shard.ID)
+        }
+        sort.Slice(candidates, func(i, j int) bool {
+            si, _ := candidates[i].Capabilities["score"].(float64)
+            sj, _ := candidates[j].Capabilities["score"].(float64)
+            return si > sj
+        })
+        pipeline = append(pipeline, candidates[0].WorkerID)
+    }
+
+    if req.RequestID == "" {
+        req.RequestID = uuid.NewString()
+    }
+
+    jobID := uuid.NewString()
+    s.jobs.Create(protocol.InferenceSession{
+        JobID:     jobID,
+        ModelID:   req.ModelID,
+        ShardID:   shards[0].ID,
+        CreatedAt: time.Now().UTC(),
+    })
+
+    return protocol.GenerateResponse{
+        RequestID:       req.RequestID,
+        Text:            fmt.Sprintf("scheduled %d workers for %s", len(pipeline), req.ModelID),
+        GeneratedTokens: req.MaxTokens,
+        TokensPerSecond: 0,
+    }, nil
+}
+
+func (s *Scheduler) MarkAccepted(accept protocol.JobAccepted) {
+    _ = accept
+}
+
+func (s *Scheduler) MarkFailed(fail protocol.JobFailed) {
+    _ = fail
+}
+
+func (s *Scheduler) MarkComplete(complete protocol.JobComplete) {
+    _ = complete
+}
+
+type JobManager struct {
+    sessions map[string]protocol.InferenceSession
+}
+
+func NewJobManager() *JobManager {
+    return &JobManager{sessions: map[string]protocol.InferenceSession{}}
+}
+
+func (m *JobManager) Create(session protocol.InferenceSession) {
+    m.sessions[session.JobID] = session
+}
+
+func (m *JobManager) Get(jobID string) (protocol.InferenceSession, bool) {
+    s, ok := m.sessions[jobID]
+    return s, ok
+}
