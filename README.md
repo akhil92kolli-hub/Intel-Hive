@@ -14,6 +14,7 @@ The scheduler operates on `ModelShard` objects rather than device identities. Th
 
 ## Repository layout
 
+- `website/` — React/Vite IntelHive landing page for Cloudflare Pages or Vercel
 - `android-worker/` — Kotlin Android worker and llama.cpp integration
 - `ios-worker/` — Swift iOS worker, scheduler transport, capabilities, and inference backend interface
 - `server/` — Go gateway, scheduler, registry, and job runtime
@@ -22,6 +23,10 @@ The scheduler operates on `ModelShard` objects rather than device identities. Th
 - `benchmark/` — repeatable transport and inference measurements
 - `deployment/` — local Docker Compose services
 - `docs/` — architecture and protocol notes
+
+## Website deployment
+
+The static landing page lives in `website/`. In Cloudflare Pages or Vercel, set the project root directory to `website`, build command to `npm run build`, and output directory to `dist`. See [`website/README.md`](website/README.md) for local development and provider-specific setup.
 
 ## iOS worker
 
