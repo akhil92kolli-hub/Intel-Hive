@@ -66,7 +66,7 @@ class LlamaCppBenchmarkEngine(private val context: Context) {
     ): BenchmarkResult {
         return withContext(Dispatchers.Default) {
             val startTimeMs = System.currentTimeMillis()
-            val startMem = Debug.getNativeHeap()[Debug.getNativeHeap().size - 1].totalMem
+            val startMem = Debug.getNativeHeapAllocatedSize()
 
             // Prefill phase: process prompt tokens
             val prefillStart = System.nanoTime()
@@ -83,12 +83,12 @@ class LlamaCppBenchmarkEngine(private val context: Context) {
             val genTimeMs = (genEnd - genStart) / 1_000_000
 
             val totalTimeMs = System.currentTimeMillis() - startTimeMs
-            val endMem = Debug.getNativeHeap()[Debug.getNativeHeap().size - 1].totalMem
+            val endMem = Debug.getNativeHeapAllocatedSize()
 
             val totalTokens = prefillTokens + generatedTokens
-            val tokensPerSecond = totalTokens * 1000.0 / totalTimeMs
-            val prefillSpeed = prefillTokens * 1000.0 / prefillTimeMs
-            val genSpeed = generatedTokens * 1000.0 / genTimeMs
+            val tokensPerSecond = rate(totalTokens, totalTimeMs)
+            val prefillSpeed = rate(prefillTokens, prefillTimeMs)
+            val genSpeed = rate(generatedTokens, genTimeMs)
 
             BenchmarkResult(
                 modelName = "qwen2.5-3b-instruct",
@@ -133,6 +133,9 @@ class LlamaCppBenchmarkEngine(private val context: Context) {
         // Placeholder: returns estimated value
         return 1200L
     }
+
+    private fun rate(tokens: Int, elapsedMillis: Long): Double =
+        if (elapsedMillis > 0) tokens * 1000.0 / elapsedMillis else 0.0
 
     private fun getDeviceTemperature(): Float {
         // Read thermal zone or power supply temperature
