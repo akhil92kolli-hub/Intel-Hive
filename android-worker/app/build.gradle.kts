@@ -6,6 +6,7 @@ plugins {
 android {
     namespace = "com.intellihive.worker"
     compileSdk = 34
+    ndkVersion = "26.3.11579264"
 
     defaultConfig {
         applicationId = "com.intellihive.worker"
@@ -14,6 +15,20 @@ android {
         versionCode = 1
         versionName = "0.1.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+
+        ndk {
+            abiFilters += "arm64-v8a"
+        }
+
+        externalNativeBuild {
+            cmake {
+                arguments += listOf(
+                    "-DINTELHIVE_LLAMA_SOURCE_DIR=" + providers.gradleProperty("intelhive.llamaSourceDir")
+                        .orElse(rootProject.file("../.devtools/llama-source").absolutePath).get()
+                )
+                cppFlags += "-std=c++17"
+            }
+        }
     }
 
     buildTypes {
@@ -33,6 +48,13 @@ android {
 
     kotlinOptions {
         jvmTarget = "17"
+    }
+
+    externalNativeBuild {
+        cmake {
+            path = file("src/main/cpp/CMakeLists.txt")
+            version = "3.22.1"
+        }
     }
 }
 
