@@ -8,7 +8,10 @@ let package = Package(
         .library(name: "IntelHiveWorker", targets: ["IntelHiveWorker"])
     ],
     targets: [
-        .target(name: "IntelHiveWorker"),
+        .target(
+            name: "IntelHiveWorker",
+            resources: [.process("Resources")]
+        ),
         .testTarget(name: "IntelHiveWorkerTests", dependencies: ["IntelHiveWorker"])
     ]
 )

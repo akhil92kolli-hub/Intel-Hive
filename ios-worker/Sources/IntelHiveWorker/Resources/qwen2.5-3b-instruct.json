@@ -1,0 +1,16 @@
+{
+  "model_id": "qwen2.5-3b-instruct",
+  "version": "1.0.0",
+  "artifact_digest": "sha256:626b4a6678b86442240e33df819e00132d3ba7dddfe1cdc4fbb18e0a9615c62d",
+  "architecture": "qwen2",
+  "layers": 36,
+  "hidden_size": 2048,
+  "shards": [
+    {
+      "download_url": "https://huggingface.co/Qwen/Qwen2.5-3B-Instruct-GGUF/resolve/main/qwen2.5-3b-instruct-q4_k_m.gguf",
+      "sha256": "sha256:626b4a6678b86442240e33df819e00132d3ba7dddfe1cdc4fbb18e0a9615c62d",
+      "size_bytes": 2104932768
+    }
+  ],
+  "total_size_bytes": 2104932768
+}

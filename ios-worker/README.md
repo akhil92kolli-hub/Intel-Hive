@@ -78,11 +78,25 @@ swift test
 ## Device-validation status
 
 The Swift package is ready to be added to an iOS app for scheduler registration
-and heartbeat validation. It is not yet an installable worker app and does not
-contain the Android-equivalent native shard executor. In particular, there is
-no bundled llama.cpp/ggml target, Objective-C++ bridge, model-artifact manager,
-or transport-to-shard-execution adapter. An iPhone cannot run the Qwen GGUF
-three-shard prefill/decode test until those pieces exist.
+and heartbeat validation. It includes `RequiredModelManager`, which loads the
+bundled canonical Qwen catalog or a configurable HTTPS manifest, rejects any
+model identity/dimension/digest/size mismatch, verifies complete file size and
+SHA-256, and installs only verified artifacts under Application Support. The
+GGUF is never bundled into the app.
+
+The app host should use a background `URLSessionDownloadTask` to provide the
+first-launch UI, progress, cancellation, and resume-data handling. Configure
+the session with `allowsExpensiveNetworkAccess = false` and
+`allowsConstrainedNetworkAccess = false` for the Wi-Fi-default policy, then
+pass its completed temporary file to `installVerifiedDownload`. A worker must
+call `verifiedInstalledFile(for:)` before native model preparation and must not
+connect to the scheduler when verification fails.
+
+The package is not yet an installable worker app and does not contain the
+Android-equivalent native shard executor. In particular, there is no bundled
+llama.cpp/ggml target, Objective-C++ bridge, or transport-to-shard-execution
+adapter. An iPhone cannot run the Qwen GGUF three-shard prefill/decode test
+until those pieces exist.
 
 The next iOS implementation sequence is:
 
@@ -91,8 +105,8 @@ The next iOS implementation sequence is:
    iPhone targets, then expose them through an Objective-C++ bridge.
 3. Mirror Android's `ShardExecutionRequest` / result validation and preserve
    per-sequence KV cache state in the native executor.
-4. Store the verified Qwen2.5-3B Q4_K_M artifact in the app container and
-   verify its SHA-256 before load.
+4. Bind the existing verified-model manager to a background URLSession download
+   UI, then pass its verified artifact URL to the native backend.
 5. Add an on-device XCTest that exercises three local shards, prefill, decode,
    and sequence cleanup; then connect the worker to the LAN scheduler.
 
