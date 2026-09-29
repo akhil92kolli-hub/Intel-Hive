@@ -7,6 +7,8 @@ data class ModelSpec(
     @SerializedName("model_id")
     val modelId: String,
     val version: String,
+    @SerializedName("artifact_digest")
+    val artifactDigest: String = "",
     val architecture: String,
     @SerializedName("layer_count")
     val layerCount: Int,
@@ -111,7 +113,11 @@ data class InferenceStep(
 
 /** Tensor output from the inclusive `layer` boundary on the source worker. */
 data class Activation(
- val position: Int = 0,
+    // position remains only for v2 compatibility; execution uses the fields below.
+    val position: Int = 0,
+    @SerializedName("pass_ordinal") val passOrdinal: Long = 0,
+    @SerializedName("kv_token_offset") val kvTokenOffset: Long = 0,
+    @SerializedName("token_count") val tokenCount: Long = 0,
     @SerializedName("job_id")
     val jobId: String,
     @SerializedName("request_id")
@@ -122,6 +128,7 @@ data class Activation(
     val modelId: String,
     @SerializedName("model_version")
     val modelVersion: String,
+    @SerializedName("model_artifact_digest") val modelArtifactDigest: String = "",
     @SerializedName("source_worker")
     val sourceWorker: String,
     @SerializedName("destination_worker")
@@ -129,6 +136,9 @@ data class Activation(
     val layer: Int,
     val dtype: String,
     val shape: List<Long>,
+    val layout: String = "",
+    @SerializedName("byte_order") val byteOrder: String = "",
+    @SerializedName("byte_length") val byteLength: Long = 0,
     val payload: ByteArray,
     @SerializedName("checksum")
     val checksum: String
@@ -151,8 +161,15 @@ data class Activation(
         else -> null
     }
 
+    fun canonicalSpecOrNull(): CanonicalTensorSpec? {
+        val dtype = when (dtype) { "F16" -> TensorDType.F16; "F32" -> TensorDType.F32; else -> return null }
+        if (layout != "ROW_MAJOR_CONTIGUOUS" || byteOrder != "LITTLE_ENDIAN" || byteLength != payload.size.toLong()) return null
+        return CanonicalTensorSpec(dtype, shape, TensorLayout.ROW_MAJOR_CONTIGUOUS, TensorByteOrder.LITTLE_ENDIAN, byteLength)
+            .takeIf { it.validate() == null }
+    }
+
     private fun payloadSizeError(): String? {
-        var expected = when (dtype) { "float32" -> 4L; "float16" -> 2L; "uint8" -> 1L; else -> return "unsupported activation dtype" }
+        var expected = when (dtype) { "float32", "F32" -> 4L; "float16", "F16" -> 2L; "uint8" -> 1L; else -> return "unsupported activation dtype" }
         for (dimension in shape) {
             if (dimension > payload.size.toLong() / expected) return "activation shape does not match payload length"
             expected *= dimension

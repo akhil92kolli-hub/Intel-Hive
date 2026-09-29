@@ -84,7 +84,17 @@ object WorkerAssignmentAdapter {
         }
         require(mode != ExecutionMode.DECODE || assignment.tokenCount == 1L) { "decode token_count must be one" }
         val input = assignment.inputTokenIds?.let { ExecutionInput.TokenIDs(it) }
-            ?: assignment.activation?.let { error("activation envelope requires canonical tensor fields before native execution") }
+            ?: assignment.activation?.let { activation ->
+                val spec = activation.canonicalSpecOrNull()
+                    ?: error("activation envelope is not a canonical tensor")
+                require(activation.modelArtifactDigest == assignment.modelArtifactDigest &&
+                    activation.passOrdinal == assignment.passOrdinal &&
+                    activation.kvTokenOffset == assignment.kvTokenOffset &&
+                    activation.tokenCount == assignment.tokenCount) {
+                    "activation execution metadata does not match assignment"
+                }
+                ExecutionInput.Activation(activation.payload, spec)
+            }
             ?: error("native execution requires token IDs or a canonical activation")
         return ShardExecutionRequest(
             requestId = assignment.requestId, sequenceId = assignment.sequenceId,
