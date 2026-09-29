@@ -469,7 +469,7 @@ class WorkerService : Service() {
         private const val DEFAULT_HEARTBEAT_SECONDS = 15
         private const val HEARTBEAT_TIMEOUT_SECONDS = 45L
         private const val BYTES_PER_MB = 1024L * 1024L
-        private const val PROTOCOL_VERSION = "phase-0-v2"
+        private const val PROTOCOL_VERSION = "phase-0-v3"
         private const val PREFERENCES = "worker_runtime"
         private const val KEY_WORKER_ID = "worker_id"
         const val KEY_CONNECTED = "connected"

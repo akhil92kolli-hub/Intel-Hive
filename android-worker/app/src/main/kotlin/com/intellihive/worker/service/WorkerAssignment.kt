@@ -16,7 +16,8 @@ data class WorkerEnvelope(
 
 data class WorkerJobAssignment(
  @SerializedName("request_id") val requestId: String = "",
- @SerializedName("model_version") val modelVersion: String = "",
+    @SerializedName("model_version") val modelVersion: String = "",
+    @SerializedName("model_artifact_digest") val modelArtifactDigest: String = "",
  @SerializedName("worker_id") val workerId: String = "",
  @SerializedName("previous_worker") val previousWorker: String? = null,
  @SerializedName("next_worker") val nextWorker: String? = null,
@@ -27,6 +28,9 @@ data class WorkerJobAssignment(
     val phase: String = "",
     @SerializedName("sequence_id") val sequenceId: String = "",
     val position: Int = 0,
+    @SerializedName("pass_ordinal") val passOrdinal: Long = 0,
+    @SerializedName("kv_token_offset") val kvTokenOffset: Long = 0,
+    @SerializedName("token_count") val tokenCount: Long = 0,
     val prompt: String? = null,
     @SerializedName("input_token_ids") val inputTokenIds: List<Long>? = null,
     val activation: Activation? = null,

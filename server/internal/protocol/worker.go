@@ -5,7 +5,7 @@ import (
 	"time"
 )
 
-const ProtocolVersion = "phase-0-v2"
+const ProtocolVersion = "phase-0-v3"
 
 // WorkerRegisterRequest is sent by a worker to the server.
 type WorkerRegisterRequest struct {
@@ -28,6 +28,7 @@ type WorkerRegisterRequest struct {
 type LoadedShardInfo struct {
 	ModelVersion string `json:"model_version"`
 	ModelID      string `json:"model_id"`
+	ModelArtifactDigest string `json:"model_artifact_digest"`
 	ShardID      string `json:"shard_id"`
 	LayerStart   int    `json:"layer_start"`
 	LayerEnd     int    `json:"layer_end"`
@@ -103,6 +104,7 @@ type HeartbeatResponse struct {
 type JobAssignment struct {
 	RequestID      string               `json:"request_id"`
 	ModelVersion   string               `json:"model_version"`
+	ModelArtifactDigest string           `json:"model_artifact_digest"`
 	WorkerID       string               `json:"worker_id"`
 	PreviousWorker string               `json:"previous_worker,omitempty"`
 	NextWorker     string               `json:"next_worker,omitempty"`
@@ -113,6 +115,9 @@ type JobAssignment struct {
 	Phase          InferencePhase       `json:"phase,omitempty"`
 	SequenceID     string               `json:"sequence_id,omitempty"`
 	Position       uint32               `json:"position,omitempty"`
+	PassOrdinal    uint64               `json:"pass_ordinal"`
+	KVTokenOffset  uint32               `json:"kv_token_offset"`
+	TokenCount     uint32               `json:"token_count"`
 	Prompt         string               `json:"prompt,omitempty"`
 	InputTokenIDs  []uint32             `json:"input_token_ids,omitempty"`
 	Activation     *activation.Envelope `json:"activation,omitempty"`
@@ -137,6 +142,9 @@ type JobComplete struct {
 	Output         []byte               `json:"output"`
 	SequenceID     string               `json:"sequence_id,omitempty"`
 	Position       uint32               `json:"position,omitempty"`
+	PassOrdinal    uint64               `json:"pass_ordinal"`
+	KVTokenOffsetBefore uint32          `json:"kv_token_offset_before"`
+	KVTokenOffsetAfter  uint32          `json:"kv_token_offset_after"`
 	Activation     *activation.Envelope `json:"activation,omitempty"`
 	SampledTokenID *uint32              `json:"sampled_token_id,omitempty"`
 	EndOfSequence  bool                 `json:"end_of_sequence,omitempty"`

@@ -27,16 +27,18 @@ const (
 
 // WorkerRecord is the scheduler's platform-independent view of a worker.
 type WorkerRecord struct {
-	ID           string
-	State        WorkerState
-	Platform     WorkerPlatform
-	Layers       []model.LayerRange
-	ModelShards  map[string]map[string]model.LayerRange
-	Benchmarks   map[string]float64
-	MemoryMB     int
-	Load         int
-	LastSeen     time.Time
-	RegisteredAt time.Time
+	ID          string
+	State       WorkerState
+	Platform    WorkerPlatform
+	Layers      []model.LayerRange
+	ModelShards map[string]map[string]model.LayerRange
+	// ModelArtifactDigests binds an advertised shard to the exact model bytes.
+	ModelArtifactDigests map[string]map[string]string
+	Benchmarks           map[string]float64
+	MemoryMB             int
+	Load                 int
+	LastSeen             time.Time
+	RegisteredAt         time.Time
 }
 
 func (w *WorkerRecord) CanServeLayer(layer model.LayerRange) bool {
@@ -58,6 +60,22 @@ func (w *WorkerRecord) CanServeShard(modelID, shardID string, layer model.LayerR
 		return exists && covered == layer
 	}
 	return w.CanServeLayer(layer)
+}
+
+// CanServeModelShard extends range feasibility with cryptographic artifact
+// identity. A legacy record without a digest is eligible only for an
+// unpinned shard; real execution shards must always be pinned.
+func (w *WorkerRecord) CanServeModelShard(shard model.ModelShard) bool {
+	if !w.CanServeShard(shard.ModelID, shard.ID, shard.Layers) {
+		return false
+	}
+	if shard.ArtifactDigest == "" {
+		return true
+	}
+	if w.ModelArtifactDigests == nil || w.ModelArtifactDigests[shard.ModelID] == nil {
+		return false
+	}
+	return w.ModelArtifactDigests[shard.ModelID][shard.ID] == shard.ArtifactDigest
 }
 
 func (w *WorkerRecord) IsEligible() bool {

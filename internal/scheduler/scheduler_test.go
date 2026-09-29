@@ -68,6 +68,17 @@ func TestBuildPlanDoesNotAssignShardAcrossModels(t *testing.T) {
 	}
 }
 
+func TestWorkerRejectsShardFromDifferentArtifact(t *testing.T) {
+	worker := WorkerRecord{
+		ModelShards:          map[string]map[string]model.LayerRange{"model": {"s0": {Start: 0, End: 9}}},
+		ModelArtifactDigests: map[string]map[string]string{"model": {"s0": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}},
+	}
+	shard := model.ModelShard{ID: "s0", ModelID: "model", Layers: model.LayerRange{Start: 0, End: 9}, ArtifactDigest: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}
+	if worker.CanServeModelShard(shard) {
+		t.Fatal("worker with a different model artifact must be ineligible")
+	}
+}
+
 func TestExecutePlan(t *testing.T) {
 	scheduler := New(nil)
 	for id, runtime := range mock.NewMockWorkers() {

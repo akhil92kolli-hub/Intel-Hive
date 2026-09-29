@@ -120,7 +120,7 @@ func layerRanges(shards []model.ModelShard) []model.LayerRange {
 func supportedModelLayerCount(modelID string) (int, bool) {
 	switch modelID {
 	case "qwen2.5-3b-instruct":
-		return 30, true
+		return 36, true
 	case "qwen2.5-3b":
 		return 36, true
 	default:

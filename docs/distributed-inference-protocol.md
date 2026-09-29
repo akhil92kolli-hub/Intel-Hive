@@ -25,32 +25,32 @@ capabilities are provided. Ready workers with registered model shards are
 available to the Go scheduler. `POST /inference` builds a deterministic
 pipeline from registered shard ranges, runs a prefill pass followed by
 token-by-token decode passes, and returns generated text and token IDs.
-Assignments include sequence and position metadata for worker-local KV state.
+Assignments include independent pass-ordinal and KV-token-offset metadata for
+worker-local KV state. A pass ordinal is never used as an inference position.
 Phase 0 currently recognizes the Qwen2.5-3B model identifiers and their known
 layer counts. The loop is wired through the server protocol and scheduler, but
 mobile runtimes do not yet execute real model inference assignments.
 
 The activation value contract is defined in Go as `activation.Envelope` and
-mirrored by the Android `Activation` data class. Both use string sequence IDs,
-request and model/version identity, source/destination workers, pass position,
-inclusive output-layer identity, tensor dtype/shape, Base64-encoded payload
-bytes in JSON, and a `sha256:<hex>` checksum. Scheduler job assignments and
-completions carry this envelope in their `activation` field; the legacy raw
-byte-only field has been removed from the v2 WebSocket contract. The server
-checks envelope identity, route, layer boundary, payload shape, and checksum
-before forwarding or accepting a non-final activation.
+mirrored at the Android transport boundary. It carries the request/sequence,
+model ID/version/artifact digest, route and output layer, `pass_ordinal`,
+`kv_token_offset`, and `token_count`. M1 tensors are only F16/F32,
+row-major-contiguous, little-endian values with an exact byte length and a
+`sha256:<hex>` payload checksum. Scheduler job assignments and completions
+carry this envelope in their `activation` field; the legacy raw byte-only
+field has been removed from the WebSocket contract.
 
-The protocol version is `phase-0-v2`. A v2 assignment also carries the model
-revision and adjacent worker IDs, allowing a receiver to reject stale or
-misrouted tensors before they reach the native backend.
+The protocol version is `phase-0-v3`. A v3 assignment carries the pinned model
+artifact and adjacent worker IDs, allowing a receiver to reject stale,
+misrouted, or mismatched-model tensors before they reach the native backend.
 
 ## Remaining M1 integration
 
 1. Implement assignment execution in the iOS worker runtime.
-2. Integrate the T002C feasibility backend with Android's built native
-   runtime and GGUF/Qwen model loader.
+2. Integrate a real GGUF/Qwen model loader with Android's native layer-range
+   runtime; the current T002C prototype uses synthetic test weights.
 3. Wire the typed Android `InferenceEngine`, `ModelSpec`, `ShardSpec`, and
-   activation/state contract to a built native layer-range backend.
+   activation/state contract to that model-backed executor.
 4. Verify the native execution path on two and then three physical Android phones.
 
 The Android service now parses and validates `job_assignment`, acknowledges
@@ -68,7 +68,17 @@ does not implement `InferenceEngine`. The native T002C prototype is kept under
 `native/layer-range`; it uses ggml to prove that a residual stream can be
 executed across independently stateful inclusive layer ranges, including
 prefill, decode positions, KV reset, and malformed input handling. It uses
-deterministic test weights and is not an Android Qwen executor.
+deterministic test weights and is not an Android Qwen executor. The checked-in
+source is an extracted tree, so `upstream.lock` intentionally blocks the build
+until it is replaced with the exact 40-character revision of a llama.cpp Git
+checkout. Then build and run the feasibility test with that checkout:
+
+```sh
+cmake -S native/layer-range -B build/layer-range \
+  -DLLAMA_SOURCE_DIR=/path/to/pinned/llama.cpp -DCMAKE_BUILD_TYPE=Release
+cmake --build build/layer-range --parallel
+ctest --test-dir build/layer-range --output-on-failure
+```
 
 ## Relevant implementation files
 

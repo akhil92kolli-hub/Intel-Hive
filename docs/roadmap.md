@@ -69,12 +69,15 @@ that capability to reassign a shard after a worker failure. T012 is the
 failure/reconnection foundation for M2.
 
 T002A and T002B define the Android-side engine and activation contracts. T002C
-is still an explicit feasibility gate: the existing full-model llama.cpp JNI
-benchmark is not a layer-range executor, and must not be treated as one. The
+now has a native ggml feasibility prototype under `native/layer-range`: it
+builds and verifies split-range equivalence, prefill/decode KV positions, and
+sequence reset using deterministic synthetic weights. This proves that
+IntelHive can own partial-graph boundaries around ggml; it does not load GGUF
+weights or execute Qwen, and does not complete Android native inference. The
 scheduler owns pipeline assignment; IntelHive's worker runtime owns local
 shard execution and sequence state, while llama.cpp/ggml is only a local
-compute backend. Until T002C demonstrates partial-graph execution, real
-distributed inference remains blocked.
+compute backend. M1 remains blocked on a real model-weight loader and Android
+backend integration (T013 onward).
 
 ### M2 — Worker failure and replacement
 

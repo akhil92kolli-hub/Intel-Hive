@@ -90,7 +90,7 @@ func (s *Scheduler) BuildPlan(jobID, modelID string, shards []model.ModelShard) 
 		candidates := s.registry.List()
 		eligible := make([]WorkerRecord, 0)
 		for _, worker := range candidates {
-			if worker.IsEligible() && worker.CanServeShard(modelID, shard.ID, shard.Layers) && !used[worker.ID] {
+			if worker.IsEligible() && worker.CanServeModelShard(shard) && !used[worker.ID] {
 				eligible = append(eligible, worker)
 			}
 		}

@@ -30,9 +30,9 @@ func TestInferenceDispatchesAcrossRegisteredWorkers(t *testing.T) {
 	defer server.Close()
 
 	shards := []protocol.LoadedShardInfo{
-		{ModelVersion: "v1", ModelID: "qwen2.5-3b-instruct", ShardID: "s0", LayerStart: 0, LayerEnd: 9},
-		{ModelVersion: "v1", ModelID: "qwen2.5-3b-instruct", ShardID: "s1", LayerStart: 10, LayerEnd: 19},
-		{ModelVersion: "v1", ModelID: "qwen2.5-3b-instruct", ShardID: "s2", LayerStart: 20, LayerEnd: 29},
+		{ModelVersion: "v1", ModelID: "qwen2.5-3b-instruct", ShardID: "s0", LayerStart: 0, LayerEnd: 11},
+		{ModelVersion: "v1", ModelID: "qwen2.5-3b-instruct", ShardID: "s1", LayerStart: 12, LayerEnd: 23},
+		{ModelVersion: "v1", ModelID: "qwen2.5-3b-instruct", ShardID: "s2", LayerStart: 24, LayerEnd: 35},
 	}
 	connections := make([]*websocket.Conn, 0, len(shards))
 	assignments := make(chan protocol.JobAssignment, 9)

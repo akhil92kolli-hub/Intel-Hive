@@ -9,19 +9,52 @@ import (
 // Envelope is the JSON activation contract shared by the scheduler and mobile
 // workers. Sequence IDs are strings to match inference-step assignments.
 type Envelope struct {
-	Position          uint32  `json:"position"`
-	JobID             string  `json:"job_id"`
-	RequestID         string  `json:"request_id"`
-	SequenceID        string  `json:"sequence_id"`
-	ModelID           string  `json:"model_id"`
-	ModelVersion      string  `json:"model_version"`
-	SourceWorker      string  `json:"source_worker"`
-	DestinationWorker string  `json:"destination_worker"`
-	Layer             int     `json:"layer"`
-	DType             string  `json:"dtype"`
-	Shape             []int64 `json:"shape"`
-	Payload           []byte  `json:"payload"`
-	Checksum          string  `json:"checksum"`
+	// Position is retained only for v2 compatibility. V3 execution uses the
+	// explicit pass ordinal and KV token range below.
+	Position            uint32  `json:"position"`
+	PassOrdinal         uint64  `json:"pass_ordinal,omitempty"`
+	KVTokenOffset       uint32  `json:"kv_token_offset,omitempty"`
+	TokenCount          uint32  `json:"token_count,omitempty"`
+	JobID               string  `json:"job_id"`
+	RequestID           string  `json:"request_id"`
+	SequenceID          string  `json:"sequence_id"`
+	ModelID             string  `json:"model_id"`
+	ModelVersion        string  `json:"model_version"`
+	ModelArtifactDigest string  `json:"model_artifact_digest,omitempty"`
+	SourceWorker        string  `json:"source_worker"`
+	DestinationWorker   string  `json:"destination_worker"`
+	Layer               int     `json:"layer"`
+	DType               string  `json:"dtype"`
+	Shape               []int64 `json:"shape"`
+	Layout              string  `json:"layout,omitempty"`
+	ByteOrder           string  `json:"byte_order,omitempty"`
+	ByteLength          uint64  `json:"byte_length,omitempty"`
+	Payload             []byte  `json:"payload"`
+	Checksum            string  `json:"checksum"`
+}
+
+// ValidateCanonical enforces the constrained v3 activation representation.
+// It intentionally excludes arbitrary strides and platform-native byte order.
+func (a Envelope) ValidateCanonical() error {
+	if err := a.Validate(); err != nil {
+		return err
+	}
+	if !validDigest(a.ModelArtifactDigest) {
+		return fmt.Errorf("activation artifact digest must be sha256:<64 hex characters>")
+	}
+	if a.TokenCount == 0 {
+		return fmt.Errorf("activation token_count must be positive")
+	}
+	if a.DType != "F16" && a.DType != "F32" {
+		return fmt.Errorf("canonical activation dtype must be F16 or F32")
+	}
+	if a.Layout != "ROW_MAJOR_CONTIGUOUS" || a.ByteOrder != "LITTLE_ENDIAN" {
+		return fmt.Errorf("activation must be row-major contiguous little-endian")
+	}
+	if a.ByteLength != uint64(len(a.Payload)) {
+		return fmt.Errorf("activation byte_length does not match payload")
+	}
+	return nil
 }
 
 func NewEnvelope(jobID, requestID, sequenceID, modelID, modelVersion string,
@@ -75,7 +108,7 @@ func (a Envelope) Validate() error {
 	if len(a.Payload) == 0 {
 		return fmt.Errorf("activation payload cannot be empty")
 	}
-	bytesPerElement := map[string]int64{"float32": 4, "float16": 2, "uint8": 1}[a.DType]
+	bytesPerElement := map[string]int64{"float32": 4, "float16": 2, "uint8": 1, "F16": 2, "F32": 4}[a.DType]
 	if bytesPerElement == 0 {
 		return fmt.Errorf("unsupported activation dtype %q", a.DType)
 	}
@@ -98,6 +131,18 @@ func (a Envelope) Validate() error {
 func envelopeChecksum(payload []byte) string {
 	sum := sha256.Sum256(payload)
 	return fmt.Sprintf("sha256:%x", sum[:])
+}
+
+func validDigest(value string) bool {
+	if !strings.HasPrefix(value, "sha256:") || len(value) != len("sha256:")+64 {
+		return false
+	}
+	for _, r := range value[len("sha256:"):] {
+		if !(r >= '0' && r <= '9' || r >= 'a' && r <= 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 // ValidateBoundary binds a tensor to the exact pass and adjacent workers.

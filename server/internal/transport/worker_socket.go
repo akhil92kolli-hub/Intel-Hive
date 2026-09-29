@@ -155,14 +155,17 @@ func (h *WorkerSocketHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) 
 					Layers:   capabilities.Layers, Benchmarks: capabilities.Benchmarks,
 					MemoryMB:    capabilities.MemoryMB,
 					ModelShards: make(map[string]map[string]model.LayerRange),
+					ModelArtifactDigests: make(map[string]map[string]string),
 				}
 				for _, shard := range request.LoadedShards {
 					if record.ModelShards[shard.ModelID] == nil {
 						record.ModelShards[shard.ModelID] = make(map[string]model.LayerRange)
+						record.ModelArtifactDigests[shard.ModelID] = make(map[string]string)
 					}
 					record.ModelShards[shard.ModelID][shard.ShardID] = model.LayerRange{
 						Start: shard.LayerStart, End: shard.LayerEnd,
 					}
+					record.ModelArtifactDigests[shard.ModelID][shard.ShardID] = shard.ModelArtifactDigest
 				}
 				if err := h.Scheduler.RegisterWorker(record, remote); err != nil {
 					remote.Close()
@@ -182,7 +185,7 @@ func (h *WorkerSocketHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) 
 						h.models[shard.ModelID] = make(map[string]model.ModelShard)
 					}
 					h.models[shard.ModelID][shard.ShardID] = model.ModelShard{
-						ID: shard.ShardID, ModelID: shard.ModelID, Version: shard.ModelVersion,
+						ID: shard.ShardID, ModelID: shard.ModelID, Version: shard.ModelVersion, ArtifactDigest: shard.ModelArtifactDigest,
 						Layers: model.LayerRange{Start: shard.LayerStart, End: shard.LayerEnd},
 					}
 				}
