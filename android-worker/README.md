@@ -80,15 +80,29 @@ one decode step.
 
 ## Build
 
-The app pins Android NDK `26.3.11579264` and CMake `3.22.1`, and builds only
-`arm64-v8a`. Provide the llama.cpp checkout or extracted source at the revision
-recorded in `native/layer-range/upstream.lock`. By default Gradle expects it at
-`.devtools/llama-source` relative to the repository root; override that path
-with `-Pintelhive.llamaSourceDir=/absolute/path/to/llama.cpp`.
+The checked-in Gradle wrapper pins Gradle `8.7`. Install JDK 17 and set
+`ANDROID_SDK_ROOT` to an Android SDK containing Platform 34, Build Tools
+34.0.0, Platform-Tools, Android NDK `26.3.11579264`, and CMake `3.22.1`:
 
 ```bash
-gradle -p android-worker \
-  -Pintelhive.llamaSourceDir="$PWD/.devtools/llama-source" \
+sdkmanager \
+  "platform-tools" \
+  "platforms;android-34" \
+  "build-tools;34.0.0" \
+  "ndk;26.3.11579264" \
+  "cmake;3.22.1"
+```
+
+The app builds only `arm64-v8a`. Provide the llama.cpp checkout or extracted
+source at the revision recorded in `native/layer-range/upstream.lock`. By
+default Gradle expects it at `.devtools/llama-source` relative to the
+repository root; override that path with
+`-Pintelhive.llamaSourceDir=/absolute/path/to/llama.cpp`.
+
+```bash
+cd android-worker
+./gradlew \
+  -Pintelhive.llamaSourceDir="$(cd .. && pwd)/.devtools/llama-source" \
   :app:assembleDebug
 ```
 
@@ -96,8 +110,8 @@ The JNI load-probe test checks that the packaged library can load and initialize
 llama.cpp. To run it on a connected arm64 device:
 
 ```bash
-gradle -p android-worker \
-  -Pintelhive.llamaSourceDir="$PWD/.devtools/llama-source" \
+./gradlew \
+  -Pintelhive.llamaSourceDir="$(cd .. && pwd)/.devtools/llama-source" \
   :app:connectedDebugAndroidTest
 ```
 
