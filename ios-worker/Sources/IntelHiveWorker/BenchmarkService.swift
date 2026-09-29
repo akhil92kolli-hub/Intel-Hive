@@ -12,12 +12,20 @@ public actor BenchmarkService {
         let output: [String: AnyEncodable] = [
             "timestamp": AnyEncodable(result.timestamp.ISO8601Format()),
             "model": AnyEncodable(result.model), "quantization": AnyEncodable(result.quantization),
-            "device": AnyEncodable(["os_version": capabilities.osVersion, "ram_mb": capabilities.ramMB,
-                                     "gpu": capabilities.gpuName, "backend": capabilities.backend]),
-            "benchmark": AnyEncodable(["prefill_tokens": result.prefillTokens, "generated_tokens": result.generatedTokens,
-                                        "total_time_ms": result.totalTimeMS, "tokens_per_second": result.tokensPerSecond,
-                                        "prefill_speed_tokens_per_second": result.prefillSpeedTokensPerSecond,
-                                        "generation_speed_tokens_per_second": result.generationSpeedTokensPerSecond])
+            "device": AnyEncodable([
+                "os_version": AnyEncodable(capabilities.osVersion),
+                "ram_mb": AnyEncodable(capabilities.ramMB),
+                "gpu": AnyEncodable(capabilities.gpuName),
+                "backend": AnyEncodable(capabilities.backend)
+            ]),
+            "benchmark": AnyEncodable([
+                "prefill_tokens": AnyEncodable(result.prefillTokens),
+                "generated_tokens": AnyEncodable(result.generatedTokens),
+                "total_time_ms": AnyEncodable(result.totalTimeMS),
+                "tokens_per_second": AnyEncodable(result.tokensPerSecond),
+                "prefill_speed_tokens_per_second": AnyEncodable(result.prefillSpeedTokensPerSecond),
+                "generation_speed_tokens_per_second": AnyEncodable(result.generationSpeedTokensPerSecond)
+            ])
         ]
         return try JSONEncoder().encode(output)
     }

@@ -53,7 +53,7 @@ public actor SchedulerClient {
     }
 
     private func sendRegister() async throws {
-        guard socket != nil else { throw URLError(.notConnected) }
+        guard socket != nil else { throw URLError(.notConnectedToInternet) }
         let payload = WorkerRegisterPayload(
             protocolVersion: configuration.protocolVersion,
             workerID: identity.workerID,
@@ -91,7 +91,7 @@ public actor SchedulerClient {
         state: WorkerState,
         tokensPerSecond: Double? = nil
     ) async throws {
-        guard socket != nil else { throw URLError(.notConnected) }
+        guard socket != nil else { throw URLError(.notConnectedToInternet) }
         let power = DeviceCapabilities.powerStatus()
         let heartbeat = HeartbeatPayload(
             workerID: identity.workerID,
@@ -121,7 +121,7 @@ public actor SchedulerClient {
     private func send<Payload: Encodable & Sendable>(
         _ envelope: WorkerEnvelope<Payload>
     ) async throws {
-        guard let socket else { throw URLError(.notConnected) }
+        guard let socket else { throw URLError(.notConnectedToInternet) }
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
         let data = try encoder.encode(envelope)
@@ -134,7 +134,7 @@ public actor SchedulerClient {
     private func receive<Payload: Decodable>(
         type expectedType: String
     ) async throws -> WorkerServerEnvelope<Payload> {
-        guard let socket else { throw URLError(.notConnected) }
+        guard let socket else { throw URLError(.notConnectedToInternet) }
         let message = try await socket.receive()
         let data: Data
         switch message {
@@ -252,6 +252,6 @@ public enum WorkerRuntimeError: LocalizedError, Equatable {
 
 private extension UInt32 {
     func clamped(to range: ClosedRange<UInt32>) -> UInt32 {
-        min(max(self, range.lowerBound), range.upperBound)
+        Swift.min(Swift.max(self, range.lowerBound), range.upperBound)
     }
 }

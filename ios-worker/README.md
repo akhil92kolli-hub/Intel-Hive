@@ -12,7 +12,8 @@ The iOS worker mirrors the Android Phase-0 worker while using native iOS APIs:
 
 - iOS 16 or newer
 - arm64 device (simulator registration is supported, but inference is not)
-- Xcode 15 or newer
+- Full Xcode 15 or newer with an iOS device-support runtime. The macOS Command
+  Line Tools package alone cannot build XCTest targets or deploy an iPhone app.
 - A minimum of 3 GB free storage for the Qwen2.5-3B-Instruct Q4_K_M model
 
 ## Add to an iOS app
@@ -60,8 +61,40 @@ arbitrary-load exception.
 
 ```bash
 cd ios-worker
+swift build
 swift test
 ```
+
+`swift build` validates the package target on macOS. `swift test` requires full
+Xcode because the package tests import XCTest. Select the full installation
+before testing:
+
+```bash
+sudo xcode-select --switch /Applications/Xcode.app/Contents/Developer
+xcodebuild -version
+swift test
+```
+
+## Device-validation status
+
+The Swift package is ready to be added to an iOS app for scheduler registration
+and heartbeat validation. It is not yet an installable worker app and does not
+contain the Android-equivalent native shard executor. In particular, there is
+no bundled llama.cpp/ggml target, Objective-C++ bridge, model-artifact manager,
+or transport-to-shard-execution adapter. An iPhone cannot run the Qwen GGUF
+three-shard prefill/decode test until those pieces exist.
+
+The next iOS implementation sequence is:
+
+1. Create an iOS 16 app host and add this package as a local dependency.
+2. Compile the pinned llama.cpp and IntelHive layer-range sources for arm64
+   iPhone targets, then expose them through an Objective-C++ bridge.
+3. Mirror Android's `ShardExecutionRequest` / result validation and preserve
+   per-sequence KV cache state in the native executor.
+4. Store the verified Qwen2.5-3B Q4_K_M artifact in the app container and
+   verify its SHA-256 before load.
+5. Add an on-device XCTest that exercises three local shards, prefill, decode,
+   and sequence cleanup; then connect the worker to the LAN scheduler.
 
 ## Inference backend
 

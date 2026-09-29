@@ -28,8 +28,9 @@ public struct DeviceCapabilities: Sendable {
         let os = ProcessInfo.processInfo.operatingSystemVersionString
         #endif
         let totalRAMMB = ProcessInfo.processInfo.physicalMemory / 1_048_576
-        #if canImport(os)
-        let availableRAMMB = min(totalRAMMB, os_proc_available_memory() / 1_048_576)
+        #if os(iOS) || os(tvOS) || os(watchOS)
+        let availableBytes = UInt64(os_proc_available_memory())
+        let availableRAMMB = Swift.min(totalRAMMB, availableBytes / 1_048_576)
         #else
         let availableRAMMB = totalRAMMB
         #endif
