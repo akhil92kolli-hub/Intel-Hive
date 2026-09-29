@@ -30,7 +30,8 @@ class NativeLayerRangeInstrumentedTest {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         val modelName = "qwen2.5-3b-instruct-q4_k_m.gguf"
         val cacheModel = File(context.cacheDir, "models/$modelName")
-        val externalModel = context.getExternalFilesDir(null)?.let { File(it, "models/$modelName") }
+        val externalModel = context.getExternalFilesDir("Documents")
+            ?.let { File(it, "models/$modelName") }
         val model = externalModel?.takeIf { it.isFile } ?: cacheModel
         assumeTrue("Install the verified Q4_K_M GGUF at ${model.absolutePath}", model.isFile)
 
@@ -119,7 +120,7 @@ class NativeLayerRangeInstrumentedTest {
         shard = ExecutionShardSpec(
             id = "layers-$firstLayer-$lastLayer",
             modelId = "qwen2.5-3b",
-            modelVersion = "1",
+            modelVersion = "1.0.0",
             modelArtifactDigest =
                 "sha256:626b4a6678b86442240e33df819e00132d3ba7dddfe1cdc4fbb18e0a9615c62d",
             layerStart = firstLayer,

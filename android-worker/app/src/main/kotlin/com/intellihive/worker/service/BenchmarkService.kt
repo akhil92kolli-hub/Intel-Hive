@@ -6,7 +6,11 @@ import android.os.IBinder
 import android.util.Log
 import com.google.gson.Gson
 import com.google.gson.GsonBuilder
+import com.intellihive.worker.BuildConfig
+import com.intellihive.worker.benchmark.SupabaseBenchmarkUploader
 import com.intellihive.worker.inference.LlamaCppBenchmarkEngine
+import com.intellihive.worker.model.ModelManifest
+import com.intellihive.worker.model.RequiredModelManager
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -19,6 +23,7 @@ import java.util.*
 class BenchmarkService : Service() {
 
     private val engine by lazy { LlamaCppBenchmarkEngine(this) }
+    private val benchmarkUploader by lazy { SupabaseBenchmarkUploader() }
     private val gson: Gson = GsonBuilder().setPrettyPrinting().create()
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
@@ -50,7 +55,7 @@ class BenchmarkService : Service() {
     private suspend fun runBenchmark(prefillTokens: Int, generatedTokens: Int) {
         Log.d("BenchmarkService", "Loading model...")
 
-        val modelPath = "${cacheDir}/models/qwen2.5-3b-instruct-q4_k_m.gguf"
+        val modelPath = RequiredModelManager.defaultModelFile(this@BenchmarkService).absolutePath
 
         if (!engine.loadModel(modelPath, gpuLayers = 36)) {
             throw IllegalStateException("Failed to load model at $modelPath")
@@ -104,6 +109,50 @@ class BenchmarkService : Service() {
         val outputFile = File(cacheDir, "benchmark_result.json")
         outputFile.writeText(json)
         Log.d("BenchmarkService", "Saved to: ${outputFile.absolutePath}")
+
+        val preferences = getSharedPreferences("worker_runtime", MODE_PRIVATE)
+        val workerId = preferences.getString("worker_id", null)
+            ?.takeIf(String::isNotBlank)
+            ?: UUID.randomUUID().toString().also {
+                preferences.edit().putString("worker_id", it).apply()
+            }
+        val databaseRow = mapOf(
+            "client_run_id" to UUID.randomUUID().toString(),
+            "platform" to "android",
+            "worker_id" to workerId,
+            "app_version" to BuildConfig.VERSION_NAME,
+            "model_id" to ModelManifest.PINNED_MODEL_ID,
+            "model_version" to ModelManifest.PINNED_MODEL_VERSION,
+            "model_artifact_digest" to ModelManifest.PINNED_ARTIFACT_DIGEST,
+            "device_model" to getDeviceModel(),
+            "os_version" to android.os.Build.VERSION.RELEASE,
+            "backend" to "llama.cpp-cpu",
+            "prefill_tokens" to result.prefillTokens,
+            "generated_tokens" to result.generatedTokens,
+            "total_time_ms" to result.totalTimeMs,
+            "tokens_per_second" to result.tokensPerSecond,
+            "prefill_tokens_per_second" to result.prefillSpeedTokensPerSecond,
+            "generation_tokens_per_second" to result.generationSpeedTokensPerSecond,
+            "peak_rss_mb" to result.peakRssMb,
+            "peak_gpu_mb" to result.peakGpuMb,
+            "initial_temperature_c" to result.initialTempC,
+            "peak_temperature_c" to result.peakTempC,
+            "final_temperature_c" to result.finalTempC,
+            "activation_size_bytes" to result.activationSizeBytes,
+            "activation_dtype" to result.activationDtype,
+            "activation_shape" to result.activationShape,
+            "raw_result" to output
+        )
+        try {
+            benchmarkUploader.upload(databaseRow)
+            Log.d("BenchmarkService", "Benchmark uploaded to Supabase")
+        } catch (error: Exception) {
+            Log.e(
+                "BenchmarkService",
+                "Benchmark saved locally but Supabase upload failed",
+                error
+            )
+        }
 
     }
 

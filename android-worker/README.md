@@ -31,10 +31,11 @@ AndroidWorker
 ├── LlamaCppBenchmarkEngine
 │   └── full-model local benchmark only; not a shard executor
 │
-├── ModelManager
-│   ├── shard discovery
-│   ├── hash verification
-│   └── local storage
+├── RequiredModelManager
+│   ├── manifest loading
+│   ├── download and progress tracking
+│   ├── size and SHA-256 verification
+│   └── app-specific model storage
 │
 ├── TransportLayer
 │   ├── activation serialization
@@ -44,13 +45,14 @@ AndroidWorker
 └── Benchmark
     ├── latency measurement
     ├── throughput calculation
-    └── result export (JSON)
+    ├── local result export (JSON)
+    └── append-only Supabase upload
 ```
 
 ## Phase-0 Scope
 
 - **Single device inference:** measure tokens/second for Qwen2.5-3B-Instruct Q4_K_M
-- **Local model loading:** GGUF from application assets or filesystem
+- **Model setup:** download the configured Qwen GGUF and verify its size and digest
 - **Activation contract:** describe layer-boundary tensors with metadata and a
   verified payload checksum
 - **Benchmark harness:** JSON output with timing and throughput
@@ -60,27 +62,30 @@ AndroidWorker
   inputs, report completion/failure, and release per-sequence state
 
 The runtime reports the device as `UNBENCHMARKED` until inference benchmarking
-has completed. With the pinned model installed, the JNI runtime can execute
-Qwen2.5-3B layer shards and marshal activation/token results to the worker
-contract. Run the Go gateway from `server/` and enter its WebSocket URL in the
-app. The debug build permits `ws://` for LAN testing; use only a trusted local
-network.
+has completed. On first launch the app shows the required Qwen2.5-3B model and
+offers an Android-managed download (Wi-Fi-only by default). The worker cannot
+connect until the model file is downloaded, its declared byte size and SHA-256
+are verified, and the packaged JNI engine successfully loads it. Run the Go
+gateway from `server/` and enter its WebSocket URL in the app. The debug build
+permits `ws://` for LAN testing; use only a trusted local network.
 
 The typed Android contract carries model/version and inclusive layer-range
 metadata, prefill/decode sequence identity, activation tensor metadata, and
 payload checksums. WebSocket assignments now carry the complete activation
 envelope, including request identity, worker route, pass position, dtype,
-shape, and checksum. The Android worker validates this envelope before handing
-it to the native executor. The current Android backend supports only the
-pinned Qwen2.5-3B Q4_K_M model, F32 row-major activations, and CPU execution.
+shape, and checksum. The Android worker validates this envelope before handing it to the native
+executor. The current Android backend supports only the configured Qwen2.5-3B
+Q4_K_M model, F32 row-major activations, and CPU execution.
 It does not yet establish networked multi-phone M1, GPU acceleration, generic
 GGUF/architecture support, or KV-state migration. The instrumented three-shard
 test runs the ranges sequentially on one Android device and tests prefill plus
 one decode step.
 
-## Build
+## Runtime and Build
 
-The checked-in Gradle wrapper pins Gradle `8.7`. Install JDK 17 and set
+The APK contains `libintelhive_jni.so`, which links IntelHive's JNI bridge,
+layer-range executor, and statically linked llama.cpp/ggml CPU libraries.
+The multi-gigabyte GGUF remains a separate download. Install JDK 17 and set
 `ANDROID_SDK_ROOT` to an Android SDK containing Platform 34, Build Tools
 34.0.0, Platform-Tools, Android NDK `26.3.11579264`, and CMake `3.22.1`:
 
@@ -100,19 +105,43 @@ repository root; override that path with
 `-Pintelhive.llamaSourceDir=/absolute/path/to/llama.cpp`.
 
 ```bash
-cd android-worker
-./gradlew \
-  -Pintelhive.llamaSourceDir="$(cd .. && pwd)/.devtools/llama-source" \
+gradle -p android-worker \
+  -Pintelhive.llamaSourceDir="$PWD/.devtools/llama-source" \
   :app:assembleDebug
+```
+
+The app includes a bundled testing catalog for the pinned GGUF. To make a build
+read its model manifest from an HTTPS configuration endpoint instead, pass
+`-Pintelhive.modelManifestUrl=https://host/path/qwen2.5-3b-instruct.json`.
+The endpoint must return the same manifest shape as
+`models/manifests/qwen2.5-3b-instruct.json`; its model ID, architecture,
+dimensions, digest, and size are validated against the supported native
+executor before the download URL is used.
+
+The default build reads that manifest from the public Supabase
+`model-artifacts` bucket. Supabase currently hosts the small manifest while its
+GGUF URL points to the verified upstream artifact. The GGUF is 2,104,932,768
+bytes and cannot be stored in the project until its current 50 MB Storage limit
+is raised. After that limit is raised and the object is uploaded and verified,
+use this public object path in the manifest:
+
+```text
+model-artifacts/qwen2.5-3b-instruct/1.0.0/qwen2.5-3b-instruct-q4_k_m.gguf
 ```
 
 The JNI load-probe test checks that the packaged library can load and initialize
 llama.cpp. To run it on a connected arm64 device:
 
 ```bash
-./gradlew \
-  -Pintelhive.llamaSourceDir="$(cd .. && pwd)/.devtools/llama-source" \
+gradle -p android-worker \
+  -Pintelhive.llamaSourceDir="$PWD/.devtools/llama-source" \
   :app:connectedDebugAndroidTest
+```
+
+Install the debug APK with:
+
+```bash
+adb install -r android-worker/app/build/outputs/apk/debug/app-debug.apk
 ```
 
 The instrumentation suite also contains a real-weight test. It is skipped when
@@ -120,28 +149,37 @@ the expected GGUF is not installed on the device.
 
 ## Model Setup
 
-For the real-weight instrumentation test, push the verified Qwen2.5-3B-Instruct
-Q4_K_M GGUF into the app-specific external files directory:
-
-```
-adb shell mkdir -p /sdcard/Android/data/com.intelhive.worker/files/models
-adb push qwen2.5-3b-instruct-q4_k_m.gguf \
-  /sdcard/Android/data/com.intelhive.worker/files/models/qwen2.5-3b-instruct-q4_k_m.gguf
-```
-
-The instrumented test uses that external-file copy directly, avoiding a second
-multi-gigabyte copy. The worker service itself loads the model from its private
-cache at `cache/models/qwen2.5-3b-instruct-q4_k_m.gguf`.
-
 The executor hashes the complete model file before loading it. The expected
 SHA-256 is
 `626b4a6678b86442240e33df819e00132d3ba7dddfe1cdc4fbb18e0a9615c62d`; the GGUF
 must report 36 layers and hidden size 2048. Use only a model artifact with this
 digest. The large model file is intentionally not checked into the repository.
+The verified artifact lives in app-specific external storage under
+`files/Documents/models/`; the Android DownloadManager writes to a temporary
+`.part` file, and the app renames it into place only after both size and digest
+checks pass. A failed or mismatched artifact is never made available to the
+worker executor.
 
 ## Benchmark Output
 
-The app exports JSON to the device's app cache directory:
+The app exports JSON to the device's app cache directory and then submits a
+normalized row to Supabase's `public.benchmark_results` table. The local file
+remains available if the network upload fails. The APK uses only the public
+publishable key; personal access tokens and service-role keys must never be
+placed in Gradle properties or application resources.
+
+Row Level Security permits Android and iOS clients to insert results for the
+pinned model artifact. Client-side reads, updates, and deletes are denied. Build
+configuration can override the endpoint and publishable key when needed:
+
+```bash
+gradle -p android-worker \
+  -Pintelhive.supabaseUrl=https://project-ref.supabase.co \
+  -Pintelhive.supabasePublishableKey=sb_publishable_example \
+  :app:assembleDebug
+```
+
+An exported result has this shape:
 
 ```json
 {

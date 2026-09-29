@@ -23,6 +23,47 @@
         android:layout_marginBottom="16dp" />
 
     <TextView
+        android:id="@+id/model_status"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="Loading required model..."
+        android:textSize="16sp"
+        android:textStyle="bold"
+        android:layout_marginBottom="8dp" />
+
+    <TextView
+        android:id="@+id/model_description"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="Qwen2.5 3B Instruct is required to join compute jobs."
+        android:textSize="14sp"
+        android:layout_marginBottom="8dp" />
+
+    <CheckBox
+        android:id="@+id/model_wifi_only"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:checked="true"
+        android:text="Download over Wi-Fi only" />
+
+    <ProgressBar
+        android:id="@+id/model_progress_bar"
+        style="?attr/progressBarStyleHorizontal"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:max="100"
+        android:progress="0"
+        android:visibility="visible" />
+
+    <Button
+        android:id="@+id/model_download_button"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:enabled="false"
+        android:text="Download model"
+        android:layout_marginBottom="8dp" />
+
+    <TextView
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:text="Scheduler WebSocket URL"
@@ -69,7 +110,8 @@
 
     <ScrollView
         android:layout_width="match_parent"
-        android:layout_height="match_parent">
+        android:layout_height="0dp"
+        android:layout_weight="1">
         <TextView
             android:id="@+id/metrics_text"
             android:layout_width="match_parent"

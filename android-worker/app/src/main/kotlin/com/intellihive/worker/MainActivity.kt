@@ -7,14 +7,22 @@ import android.content.IntentFilter
 import android.app.ActivityManager
 import android.os.Bundle
 import android.widget.Button
+import android.widget.CheckBox
 import android.widget.EditText
 import android.widget.ProgressBar
 import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
+import com.intellihive.worker.inference.NativeRuntime
+import com.intellihive.worker.model.ModelDownloadState
+import com.intellihive.worker.model.ModelManifest
+import com.intellihive.worker.model.RequiredModelManager
 import com.intellihive.worker.service.BenchmarkService
 import com.intellihive.worker.service.WorkerService
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
 class MainActivity : AppCompatActivity() {
@@ -26,6 +34,15 @@ class MainActivity : AppCompatActivity() {
     private lateinit var workerConnectionButton: Button
     private lateinit var schedulerUrl: EditText
     private lateinit var progressBar: ProgressBar
+    private lateinit var modelStatusText: TextView
+    private lateinit var modelDescriptionText: TextView
+    private lateinit var modelDownloadButton: Button
+    private lateinit var modelWifiOnly: CheckBox
+    private lateinit var modelProgressBar: ProgressBar
+    private lateinit var modelManager: RequiredModelManager
+    private var modelManifest: ModelManifest? = null
+    private var modelReady = false
+    private var modelDownloadJob: Job? = null
     private var receiverRegistered = false
 
     private val workerStatusReceiver = object : BroadcastReceiver() {
@@ -49,11 +66,19 @@ class MainActivity : AppCompatActivity() {
         workerConnectionButton = findViewById(R.id.worker_connection_button)
         schedulerUrl = findViewById(R.id.scheduler_url)
         progressBar = findViewById(R.id.progress_bar)
+        modelStatusText = findViewById(R.id.model_status)
+        modelDescriptionText = findViewById(R.id.model_description)
+        modelDownloadButton = findViewById(R.id.model_download_button)
+        modelWifiOnly = findViewById(R.id.model_wifi_only)
+        modelProgressBar = findViewById(R.id.model_progress_bar)
+        modelManager = RequiredModelManager(this)
 
         benchmarkButton.setOnClickListener { startBenchmark() }
+        benchmarkButton.isEnabled = false
         workerConnectionButton.setOnClickListener { toggleWorkerConnection() }
+        modelDownloadButton.setOnClickListener { toggleModelDownload() }
 
-        updateUI("Ready to benchmark Qwen2.5-3B-Instruct Q4_K_M")
+        updateUI("Prepare this device to join IntelHive")
         updateWorkerButton()
     }
 
@@ -77,16 +102,19 @@ class MainActivity : AppCompatActivity() {
                 .apply()
         }
         workerStatusText.text = if (serviceRunning && preferences.getBoolean(WorkerService.KEY_CONNECTED, false)) {
-            "Connected (unbenchmarked)"
+            "Worker ready (benchmark not run)"
         } else if (serviceRunning) {
             "Connecting to scheduler..."
         } else {
             "Worker disconnected"
         }
         updateWorkerButton()
+        refreshModelLifecycle()
     }
 
     override fun onStop() {
+        modelDownloadJob?.cancel()
+        modelDownloadJob = null
         if (receiverRegistered) {
             unregisterReceiver(workerStatusReceiver)
             receiverRegistered = false
@@ -113,6 +141,10 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun toggleWorkerConnection() {
+        if (!modelReady) {
+            workerStatusText.text = "Download and verify the required model before connecting"
+            return
+        }
         val preferences = getSharedPreferences("worker_runtime", MODE_PRIVATE)
         val requested = preferences.getBoolean(WorkerService.KEY_WORKER_REQUESTED, false)
         if (requested) {
@@ -139,6 +171,155 @@ class MainActivity : AppCompatActivity() {
         val requested = getSharedPreferences("worker_runtime", MODE_PRIVATE)
             .getBoolean(WorkerService.KEY_WORKER_REQUESTED, false)
         workerConnectionButton.text = if (requested) "Disconnect worker" else "Connect as worker"
+        workerConnectionButton.isEnabled = requested || modelReady
+    }
+
+    private fun refreshModelLifecycle() {
+        lifecycleScope.launch {
+            modelDownloadButton.isEnabled = false
+            modelStatusText.text = "Loading required model configuration..."
+            try {
+                val manifest = modelManager.loadManifest()
+                modelManifest = manifest
+                modelDescriptionText.text =
+                    "${manifest.displayName} • ${manifest.sizeLabel} download • about 2.4 GB free storage required"
+                if (modelManager.isInstalled(manifest)) {
+                    showModelReadyState()
+                    return@launch
+                }
+
+                modelReady = false
+                modelStatusText.text = "Model required to participate in compute jobs"
+                modelDownloadButton.text = "Download model (${manifest.sizeLabel})"
+                modelDownloadButton.isEnabled = true
+                updateWorkerButton()
+                resumeModelDownload(manifest)
+            } catch (error: Exception) {
+                modelReady = false
+                modelStatusText.text = "Model setup unavailable: ${error.message ?: "configuration error"}"
+                modelDescriptionText.text = "Could not load or validate the required model configuration."
+                modelDownloadButton.text = "Model configuration unavailable"
+                modelDownloadButton.isEnabled = false
+                updateWorkerButton()
+            }
+        }
+    }
+
+    private fun showModelReadyState() {
+        val runtimeReady = NativeRuntime.isAvailable()
+        modelReady = runtimeReady
+        modelStatusText.text = if (runtimeReady) {
+            "Model verified • JNI runtime packaged • Ready to connect"
+        } else {
+            "Model verified, but native engine is unavailable: ${NativeRuntime.unavailableReason()}"
+        }
+        modelDownloadButton.text = "Model verified"
+        modelDownloadButton.isEnabled = false
+        benchmarkButton.isEnabled = runtimeReady
+        modelProgressBar.isIndeterminate = false
+        modelProgressBar.progress = 100
+        updateWorkerButton()
+    }
+
+    private fun toggleModelDownload() {
+        val manifest = modelManifest ?: return
+        val activeId = modelManager.activeDownloadId(manifest)
+        if (activeId != null) {
+            modelManager.cancel(activeId)
+            modelDownloadJob?.cancel()
+            modelDownloadJob = null
+            modelProgressBar.progress = 0
+            modelStatusText.text = "Model download cancelled"
+            modelDownloadButton.text = "Download model (${manifest.sizeLabel})"
+            modelDownloadButton.isEnabled = true
+            return
+        }
+
+        try {
+            val id = modelManager.enqueueDownload(manifest, wifiOnly = modelWifiOnly.isChecked)
+            if (id == android.app.DownloadManager.INVALID_DOWNLOAD_ID) {
+                showModelReadyState()
+            } else {
+                modelDownloadButton.text = "Cancel download"
+                modelStatusText.text = if (modelWifiOnly.isChecked) {
+                    "Downloading over Wi-Fi only..."
+                } else {
+                    "Downloading model..."
+                }
+                watchModelDownload(manifest, id)
+            }
+        } catch (error: Exception) {
+            modelStatusText.text = "Could not start model download: ${error.message}"
+        }
+    }
+
+    private fun resumeModelDownload(manifest: ModelManifest) {
+        val id = modelManager.activeDownloadId(manifest) ?: return
+        when (val state = modelManager.query(id)) {
+            is ModelDownloadState.Pending, is ModelDownloadState.Downloading -> {
+                modelDownloadButton.text = "Cancel download"
+                watchModelDownload(manifest, id)
+            }
+            ModelDownloadState.Downloaded -> watchModelDownload(manifest, id)
+            is ModelDownloadState.Failed -> {
+                modelStatusText.text = state.message
+                modelManager.cancel(id)
+            }
+            ModelDownloadState.Missing -> modelManager.cancel(id)
+        }
+    }
+
+    private fun watchModelDownload(manifest: ModelManifest, downloadId: Long) {
+        modelDownloadJob?.cancel()
+        modelProgressBar.isIndeterminate = false
+        modelDownloadJob = lifecycleScope.launch {
+            while (isActive) {
+                when (val state = modelManager.query(downloadId)) {
+                    is ModelDownloadState.Pending -> {
+                        modelStatusText.text = state.message
+                        modelProgressBar.isIndeterminate = true
+                    }
+                    is ModelDownloadState.Downloading -> {
+                        modelProgressBar.isIndeterminate = false
+                        if (state.totalBytes > 0) {
+                            modelProgressBar.progress =
+                                (state.bytesDownloaded * 100 / state.totalBytes).toInt().coerceIn(0, 100)
+                        }
+                        modelStatusText.text =
+                            "Downloading model: ${modelProgressBar.progress}%"
+                    }
+                    ModelDownloadState.Downloaded -> {
+                        modelStatusText.text = "Download complete. Verifying file size and SHA-256..."
+                        modelDownloadButton.isEnabled = false
+                        try {
+                            modelManager.verifyAndInstall(manifest)
+                            showModelReadyState()
+                        } catch (error: Exception) {
+                            modelStatusText.text =
+                                "Model verification failed: ${error.message ?: "unknown error"}"
+                            modelDownloadButton.text = "Retry download"
+                            modelDownloadButton.isEnabled = true
+                            modelManager.cancel(downloadId)
+                        }
+                        return@launch
+                    }
+                    is ModelDownloadState.Failed -> {
+                        modelStatusText.text = state.message
+                        modelDownloadButton.text = "Retry download"
+                        modelDownloadButton.isEnabled = true
+                        modelManager.cancel(downloadId)
+                        return@launch
+                    }
+                    ModelDownloadState.Missing -> {
+                        modelStatusText.text = "Android download record is unavailable"
+                        modelDownloadButton.text = "Retry download"
+                        modelDownloadButton.isEnabled = true
+                        return@launch
+                    }
+                }
+                delay(1_000)
+            }
+        }
     }
 
     private fun updateUI(status: String) {

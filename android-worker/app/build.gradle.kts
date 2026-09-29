@@ -3,6 +3,27 @@ plugins {
     kotlin("android")
 }
 
+val configuredModelManifestUrl = providers.gradleProperty("intelhive.modelManifestUrl")
+    .orElse(
+        "https://uozyxansakogtpqxcpdp.supabase.co/storage/v1/object/public/" +
+            "model-artifacts/manifests/qwen2.5-3b-instruct/1.0.0/manifest.json"
+    )
+    .get()
+    .replace("\\", "\\\\")
+    .replace("\"", "\\\"")
+
+val configuredSupabaseUrl = providers.gradleProperty("intelhive.supabaseUrl")
+    .orElse("https://uozyxansakogtpqxcpdp.supabase.co")
+    .get()
+    .replace("\\", "\\\\")
+    .replace("\"", "\\\"")
+
+val configuredSupabasePublishableKey = providers.gradleProperty("intelhive.supabasePublishableKey")
+    .orElse("sb_publishable_tmCxtqxpIaNKrimWVidtxA_BnULyxkK")
+    .get()
+    .replace("\\", "\\\\")
+    .replace("\"", "\\\"")
+
 android {
     namespace = "com.intellihive.worker"
     compileSdk = 34
@@ -15,9 +36,20 @@ android {
         versionCode = 1
         versionName = "0.1.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+        buildConfigField("String", "MODEL_MANIFEST_URL", "\"$configuredModelManifestUrl\"")
+        buildConfigField("String", "SUPABASE_URL", "\"$configuredSupabaseUrl\"")
+        buildConfigField(
+            "String",
+            "SUPABASE_PUBLISHABLE_KEY",
+            "\"$configuredSupabasePublishableKey\""
+        )
 
         ndk {
             abiFilters += "arm64-v8a"
+        }
+
+        buildFeatures {
+            buildConfig = true
         }
 
         externalNativeBuild {

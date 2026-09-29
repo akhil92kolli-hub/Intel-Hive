@@ -22,6 +22,7 @@ import com.intellihive.worker.inference.NativeLayerRangeShardExecutor
 import com.intellihive.worker.inference.NativeRuntime
 import com.intellihive.worker.inference.NativeTransportShardExecutor
 import com.intellihive.worker.inference.UnavailableNativeShardExecutor
+import com.intellihive.worker.model.RequiredModelManager
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -46,6 +47,7 @@ class WorkerService : Service() {
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var client: OkHttpClient? = null
     private var socket: WebSocket? = null
+    private var initializationJob: Job? = null
     private var heartbeatJob: Job? = null
     private var workerId: String = ""
     private var heartbeatIntervalSeconds = DEFAULT_HEARTBEAT_SECONDS
@@ -60,7 +62,7 @@ class WorkerService : Service() {
             stopSelf()
             return START_NOT_STICKY
         }
-        if (socket != null) return START_NOT_STICKY
+        if (socket != null || initializationJob?.isActive == true) return START_NOT_STICKY
 
         val endpoint = intent?.getStringExtra(EXTRA_SERVER_URL)?.trim().orEmpty()
         if (!endpoint.startsWith("ws://") && !endpoint.startsWith("wss://")) {
@@ -69,13 +71,8 @@ class WorkerService : Service() {
             return START_NOT_STICKY
         }
 
-        startForeground(NOTIFICATION_ID, notification("Connecting to scheduler"))
+        startForeground(NOTIFICATION_ID, notification("Verifying model and preparing native engine"))
         workerId = getOrCreateWorkerId()
-        val httpClient = OkHttpClient.Builder()
-            .pingInterval(HEARTBEAT_TIMEOUT_SECONDS, TimeUnit.SECONDS)
-            .build()
-        client = httpClient
-
         val request = try {
             Request.Builder().url(endpoint).build()
         } catch (error: IllegalArgumentException) {
@@ -85,12 +82,50 @@ class WorkerService : Service() {
             return START_NOT_STICKY
         }
 
-        socket = httpClient.newWebSocket(request, WorkerSocketListener())
+        initializationJob = serviceScope.launch {
+            var nativeExecutor: NativeLayerRangeShardExecutor? = null
+            try {
+                val models = RequiredModelManager(this@WorkerService)
+                val manifest = models.loadManifest()
+                check(models.isInstalled(manifest)) {
+                    "Required model is not verified. Download it before connecting the worker."
+                }
+                check(NativeRuntime.isAvailable()) {
+                    "Native engine unavailable: ${NativeRuntime.unavailableReason()}"
+                }
+                nativeExecutor = NativeLayerRangeShardExecutor(this@WorkerService)
+                nativeExecutor.prepareModel()
+                synchronized(assignmentExecutorLock) {
+                    assignmentExecutor = NativeTransportShardExecutor(nativeExecutor)
+                }
+                reportProgress("Verified model and native engine ready; connecting to scheduler")
+
+                val httpClient = OkHttpClient.Builder()
+                    .pingInterval(HEARTBEAT_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+                    .build()
+                client = httpClient
+                socket = httpClient.newWebSocket(request, WorkerSocketListener())
+            } catch (error: kotlinx.coroutines.CancellationException) {
+                nativeExecutor?.close()
+                throw error
+            } catch (error: Exception) {
+                nativeExecutor?.close()
+                Log.e(TAG, "Worker model preparation failed", error)
+                reportStatus(
+                    "Worker could not become ready: ${error.message ?: "model setup failed"}",
+                    connected = false
+                )
+                stopSelf(startId)
+            }
+        }
         return START_NOT_STICKY
     }
 
     override fun onDestroy() {
+        val wasConnected = registered || socket != null
         registered = false
+        initializationJob?.cancel()
+        initializationJob = null
         heartbeatJob?.cancel()
         socket?.close(1000, "worker stopped")
         socket = null
@@ -101,7 +136,7 @@ class WorkerService : Service() {
             (assignmentExecutor as? AutoCloseable)?.close()
             assignmentExecutor = null
         }
-        reportStatus("Worker disconnected", connected = false)
+        if (wasConnected) reportStatus("Worker disconnected", connected = false)
         stopForeground(STOP_FOREGROUND_REMOVE)
         super.onDestroy()
     }
@@ -165,7 +200,7 @@ class WorkerService : Service() {
             DEFAULT_HEARTBEAT_SECONDS
         ).coerceIn(5, 300)
         registered = true
-        reportStatus("Connected (unbenchmarked)", connected = true)
+        reportStatus("Worker ready (benchmark not run)", connected = true)
         heartbeatJob = serviceScope.launch {
             while (isActive) {
                 delay(TimeUnit.SECONDS.toMillis(heartbeatIntervalSeconds.toLong()))
@@ -439,6 +474,11 @@ class WorkerService : Service() {
         if (connected) {
             updateNotification(message)
         }
+    }
+
+    private fun reportProgress(message: String) {
+        sendBroadcast(Intent(ACTION_STATUS).setPackage(packageName).putExtra(EXTRA_STATUS, message))
+        updateNotification(message)
     }
 
     private fun getOrCreateWorkerId(): String {

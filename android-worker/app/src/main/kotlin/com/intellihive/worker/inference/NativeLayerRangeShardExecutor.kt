@@ -8,6 +8,8 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import com.intellihive.worker.model.ModelManifest
+import com.intellihive.worker.model.RequiredModelManager
 
 internal class NativeLayerRangeBindings {
     external fun nativeLoadModel(modelPath: String): Long
@@ -34,12 +36,27 @@ internal class NativeLayerRangeBindings {
  */
 class NativeLayerRangeShardExecutor(
     context: Context,
-    private val modelFile: File = File(context.cacheDir, "models/qwen2.5-3b-instruct-q4_k_m.gguf")
+    private val modelFile: File = RequiredModelManager.defaultModelFile(context)
 ) : NativeShardExecutor, AutoCloseable {
     private val bindings = NativeLayerRangeBindings()
     private val lock = Any()
     private val modelHandles = mutableMapOf<ModelKey, LoadedModel>()
     private val shardHandles = mutableMapOf<ShardKey, Long>()
+
+    suspend fun prepareModel() = withContext(Dispatchers.IO) {
+        synchronized(lock) {
+            check(NativeRuntime.isAvailable()) {
+                "IntelHive native runtime is unavailable: ${NativeRuntime.unavailableReason()}"
+            }
+            loadModel(
+                ModelKey(
+                    MODEL_ID,
+                    MODEL_VERSION,
+                    ModelManifest.PINNED_ARTIFACT_DIGEST
+                )
+            )
+        }
+    }
 
     override suspend fun execute(request: ShardExecutionRequest): NativeShardExecutionResult =
         withContext(Dispatchers.Default) {
@@ -49,9 +66,9 @@ class NativeLayerRangeShardExecutor(
                     "IntelHive native runtime is unavailable: ${NativeRuntime.unavailableReason()}"
                 }
                 val modelKey = ModelKey(
-                    request.shard.modelId,
-                    request.shard.modelVersion,
-                    request.shard.modelArtifactDigest
+                    MODEL_ID,
+                    MODEL_VERSION,
+                    ModelManifest.PINNED_ARTIFACT_DIGEST
                 )
                 val model = modelHandles[modelKey] ?: loadModel(modelKey)
                 require(request.shard.layerEnd < model.layerCount) {
@@ -174,10 +191,13 @@ class NativeLayerRangeShardExecutor(
         require(request.requestId.isNotBlank() && request.sequenceId.isNotBlank()) {
             "request and sequence IDs are required"
         }
-        require(request.shard.modelId in SUPPORTED_MODEL_IDS && request.shard.modelVersion == MODEL_VERSION) {
-            "Android native execution supports Qwen2.5-3B model version $MODEL_VERSION only"
+        require(
+            request.shard.modelId in SUPPORTED_MODEL_IDS &&
+                request.shard.modelVersion in SUPPORTED_MODEL_VERSIONS
+        ) {
+            "Android native execution supports only the configured Qwen2.5-3B model versions"
         }
-        require(request.shard.modelArtifactDigest == MODEL_DIGEST) {
+        require(request.shard.modelArtifactDigest == ModelManifest.PINNED_ARTIFACT_DIGEST) {
             "requested model digest is not the pinned Qwen2.5-3B Q4_K_M artifact"
         }
         require(request.shard.layerStart >= 0 && request.shard.layerEnd >= request.shard.layerStart) {
@@ -209,8 +229,8 @@ class NativeLayerRangeShardExecutor(
             "Qwen2.5-3B model is not installed at ${modelFile.absolutePath}"
         }
         val actualDigest = sha256(modelFile)
-        require(actualDigest == MODEL_DIGEST.removePrefix("sha256:")) {
-            "Installed Qwen2.5-3B model digest mismatch: expected $MODEL_DIGEST, got sha256:$actualDigest"
+        require(actualDigest == ModelManifest.PINNED_ARTIFACT_DIGEST.removePrefix("sha256:")) {
+            "Installed Qwen2.5-3B model digest mismatch: expected ${ModelManifest.PINNED_ARTIFACT_DIGEST}, got sha256:$actualDigest"
         }
         val handle = bindings.nativeLoadModel(modelFile.absolutePath)
         check(handle > 0L) { "Native model loading returned an invalid handle" }
@@ -254,11 +274,11 @@ class NativeLayerRangeShardExecutor(
     companion object {
         private const val NATIVE_ACTIVATION = 1
         private const val NATIVE_TOKEN = 2
+        private const val MODEL_ID = ModelManifest.PINNED_MODEL_ID
         private const val MODEL_LAYER_COUNT = 36
         private const val MODEL_HIDDEN_SIZE = 2048
-        private const val MODEL_VERSION = "1"
-        private const val MODEL_DIGEST =
-            "sha256:626b4a6678b86442240e33df819e00132d3ba7dddfe1cdc4fbb18e0a9615c62d"
+        private const val MODEL_VERSION = ModelManifest.PINNED_MODEL_VERSION
         private val SUPPORTED_MODEL_IDS = setOf("qwen2.5-3b", "qwen2.5-3b-instruct")
+        private val SUPPORTED_MODEL_VERSIONS = setOf("1", "v1", MODEL_VERSION)
     }
 }
