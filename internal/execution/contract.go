@@ -5,6 +5,7 @@
 package execution
 
 import (
+	"context"
 	"fmt"
 	"math"
 	"strings"
@@ -12,27 +13,42 @@ import (
 	"github.com/akhil92kolli-hub/Intel-Hive/internal/model"
 )
 
-type Mode string
+type ExecutionMode string
 
 const (
-	Prefill Mode = "prefill"
-	Decode  Mode = "decode"
+	ExecutionPrefill ExecutionMode = "prefill"
+	ExecutionDecode  ExecutionMode = "decode"
+)
+
+// Mode and its values remain aliases while callers migrate to the explicit
+// execution terminology.
+type Mode = ExecutionMode
+
+const (
+	Prefill = ExecutionPrefill
+	Decode  = ExecutionDecode
 )
 
 type TensorDType string
 
 const (
-	F16 TensorDType = "F16"
-	F32 TensorDType = "F32"
+	DTypeF16 TensorDType = "f16"
+	DTypeF32 TensorDType = "f32"
+	F16                  = DTypeF16
+	F32                  = DTypeF32
 )
 
 type TensorLayout string
 
-const RowMajorContiguous TensorLayout = "ROW_MAJOR_CONTIGUOUS"
+const LayoutRowMajorContiguous TensorLayout = "row_major_contiguous"
+
+const RowMajorContiguous = LayoutRowMajorContiguous
 
 type ByteOrder string
 
-const LittleEndian ByteOrder = "LITTLE_ENDIAN"
+const ByteOrderLittleEndian ByteOrder = "little_endian"
+
+const LittleEndian = ByteOrderLittleEndian
 
 // TensorSpec is deliberately constrained for M1. Arbitrary strides and
 // platform-dependent byte order are excluded from the wire contract.
@@ -44,21 +60,50 @@ type TensorSpec struct {
 	ByteLength uint64
 }
 
+// Tensor is the canonical M1 activation representation. The M1 contract has
+// no strides: data must be row-major, contiguous, and little-endian.
+type Tensor struct {
+	DType      TensorDType
+	Shape      []uint32
+	ByteLength uint64
+	Layout     TensorLayout
+	ByteOrder  ByteOrder
+	Data       []byte
+}
+
+func (t Tensor) Spec() TensorSpec {
+	return TensorSpec{DType: t.DType, Shape: append([]uint32(nil), t.Shape...), Layout: t.Layout, ByteOrder: t.ByteOrder, ByteLength: t.ByteLength}
+}
+
+func (t Tensor) Validate() error {
+	if err := t.Spec().Validate(); err != nil {
+		return err
+	}
+	if uint64(len(t.Data)) != t.ByteLength {
+		return fmt.Errorf("tensor data length does not match byte length")
+	}
+	return nil
+}
+
+type Activation struct{ Tensor Tensor }
+
+func (a Activation) Validate() error { return a.Tensor.Validate() }
+
 func (s TensorSpec) Validate() error {
-	if s.DType != F16 && s.DType != F32 {
+	if s.DType != DTypeF16 && s.DType != DTypeF32 {
 		return fmt.Errorf("unsupported tensor dtype %q", s.DType)
 	}
-	if s.Layout != RowMajorContiguous {
+	if s.Layout != LayoutRowMajorContiguous {
 		return fmt.Errorf("unsupported tensor layout %q", s.Layout)
 	}
-	if s.ByteOrder != LittleEndian {
+	if s.ByteOrder != ByteOrderLittleEndian {
 		return fmt.Errorf("unsupported tensor byte order %q", s.ByteOrder)
 	}
 	if len(s.Shape) == 0 {
 		return fmt.Errorf("tensor shape is required")
 	}
 	bytes := uint64(2)
-	if s.DType == F32 {
+	if s.DType == DTypeF32 {
 		bytes = 4
 	}
 	for _, dimension := range s.Shape {
@@ -99,12 +144,27 @@ func (s ShardSpec) Validate() error {
 	return s.Output.Validate()
 }
 
-type Input struct {
-	TokenIDs   []uint32
-	Activation []byte
+type ShardInput struct {
+	Activation *Activation
+	Tokens     []int32
 }
 
-type Request struct {
+func (i ShardInput) Validate(tokenCount uint32) error {
+	if (i.Activation == nil) == (len(i.Tokens) == 0) {
+		return fmt.Errorf("exactly one of activation or tokens is required")
+	}
+	if i.Activation != nil {
+		return i.Activation.Validate()
+	}
+	if len(i.Tokens) != int(tokenCount) {
+		return fmt.Errorf("token count does not match token input")
+	}
+	return nil
+}
+
+type Input = ShardInput
+
+type ShardExecutionRequest struct {
 	RequestID           string
 	SequenceID          string
 	ModelID             string
@@ -112,24 +172,23 @@ type Request struct {
 	ModelArtifactDigest string
 	Shard               ShardSpec
 	PassOrdinal         uint64
-	Mode                Mode
+	Mode                ExecutionMode
 	KVTokenOffset       uint32
 	TokenCount          uint32
-	Input               Input
+	Input               ShardInput
 }
 
-func (r Request) Validate() error {
+type Request = ShardExecutionRequest
+
+func (r ShardExecutionRequest) Validate() error {
 	if strings.TrimSpace(r.RequestID) == "" || strings.TrimSpace(r.SequenceID) == "" {
 		return fmt.Errorf("request and sequence IDs are required")
 	}
-	if r.Mode != Prefill && r.Mode != Decode {
+	if r.Mode != ExecutionPrefill && r.Mode != ExecutionDecode {
 		return fmt.Errorf("unsupported execution mode %q", r.Mode)
 	}
 	if r.TokenCount == 0 {
 		return fmt.Errorf("token count must be positive")
-	}
-	if r.Mode == Decode && r.TokenCount != 1 {
-		return fmt.Errorf("decode must process exactly one token")
 	}
 	if r.ModelID != r.Shard.ModelID || r.ModelVersion != r.Shard.ModelVersion || r.ModelArtifactDigest != r.Shard.ModelArtifactDigest {
 		return fmt.Errorf("request model identity does not match shard")
@@ -137,7 +196,7 @@ func (r Request) Validate() error {
 	if err := r.Shard.Validate(); err != nil {
 		return err
 	}
-	return nil
+	return r.Input.Validate(r.TokenCount)
 }
 
 type OutputType string
@@ -149,22 +208,27 @@ const (
 	OutputEOS        OutputType = "eos"
 )
 
-type Output struct {
-	Type    OutputType
-	Tensor  []byte
-	TokenID *uint32
+type ShardOutput struct {
+	Type       OutputType
+	Activation *Activation
+	Tensor     *Tensor
+	TokenID    *uint32
 }
 
-type Result struct {
+type Output = ShardOutput
+
+type ShardExecutionResult struct {
 	RequestID           string
 	SequenceID          string
 	PassOrdinal         uint64
 	KVTokenOffsetBefore uint32
 	KVTokenOffsetAfter  uint32
-	Output              Output
+	Output              ShardOutput
 }
 
-func (r Result) ValidateFor(request Request, finalShard bool) error {
+type Result = ShardExecutionResult
+
+func (r ShardExecutionResult) ValidateFor(request ShardExecutionRequest, finalShard bool) error {
 	if r.RequestID != request.RequestID || r.SequenceID != request.SequenceID || r.PassOrdinal != request.PassOrdinal {
 		return fmt.Errorf("result identity does not match request")
 	}
@@ -177,6 +241,27 @@ func (r Result) ValidateFor(request Request, finalShard bool) error {
 		}
 	} else if r.Output.Type != OutputActivation {
 		return fmt.Errorf("intermediate shard must return an activation")
+	}
+	return nil
+}
+
+// ShardExecutor is the backend boundary. Transport adapters are responsible
+// for constructing and validating ShardExecutionRequest before this call.
+type ShardExecutor interface {
+	Execute(ctx context.Context, req ShardExecutionRequest) (ShardExecutionResult, error)
+}
+
+// ValidateNext enforces sequence-local pass and KV continuity. A backend can
+// call it with its retained prior result before it touches native state.
+func ValidateNext(previous ShardExecutionResult, next ShardExecutionRequest) error {
+	if previous.RequestID != next.RequestID || previous.SequenceID != next.SequenceID {
+		return fmt.Errorf("request or sequence does not match prior result")
+	}
+	if next.PassOrdinal != previous.PassOrdinal+1 {
+		return fmt.Errorf("pass ordinal is not contiguous")
+	}
+	if next.KVTokenOffset != previous.KVTokenOffsetAfter {
+		return fmt.Errorf("KV token offset is not contiguous")
 	}
 	return nil
 }

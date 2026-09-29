@@ -26,12 +26,12 @@ type WorkerRegisterRequest struct {
 
 // LoadedShardInfo advertises model shards that are already present and usable.
 type LoadedShardInfo struct {
-	ModelVersion string `json:"model_version"`
-	ModelID      string `json:"model_id"`
+	ModelVersion        string `json:"model_version"`
+	ModelID             string `json:"model_id"`
 	ModelArtifactDigest string `json:"model_artifact_digest"`
-	ShardID      string `json:"shard_id"`
-	LayerStart   int    `json:"layer_start"`
-	LayerEnd     int    `json:"layer_end"`
+	ShardID             string `json:"shard_id"`
+	LayerStart          int    `json:"layer_start"`
+	LayerEnd            int    `json:"layer_end"`
 }
 
 type MemoryInfo struct {
@@ -102,30 +102,42 @@ type HeartbeatResponse struct {
 }
 
 type JobAssignment struct {
-	RequestID      string               `json:"request_id"`
-	ModelVersion   string               `json:"model_version"`
-	ModelArtifactDigest string           `json:"model_artifact_digest"`
-	WorkerID       string               `json:"worker_id"`
-	PreviousWorker string               `json:"previous_worker,omitempty"`
-	NextWorker     string               `json:"next_worker,omitempty"`
-	AssignmentID   string               `json:"assignment_id"`
-	JobID          string               `json:"job_id"`
-	ModelID        string               `json:"model_id"`
-	ShardID        string               `json:"shard_id"`
-	Phase          InferencePhase       `json:"phase,omitempty"`
-	SequenceID     string               `json:"sequence_id,omitempty"`
-	Position       uint32               `json:"position,omitempty"`
-	PassOrdinal    uint64               `json:"pass_ordinal"`
-	KVTokenOffset  uint32               `json:"kv_token_offset"`
-	TokenCount     uint32               `json:"token_count"`
-	Prompt         string               `json:"prompt,omitempty"`
-	InputTokenIDs  []uint32             `json:"input_token_ids,omitempty"`
-	Activation     *activation.Envelope `json:"activation,omitempty"`
-	FinalShard     bool                 `json:"final_shard,omitempty"`
-	LayerStart     int                  `json:"layer_start"`
-	LayerEnd       int                  `json:"layer_end"`
-	Sequence       uint64               `json:"sequence"`
-	Payload        []byte               `json:"payload"`
+	RequestID           string               `json:"request_id"`
+	ModelVersion        string               `json:"model_version"`
+	ModelArtifactDigest string               `json:"model_artifact_digest"`
+	WorkerID            string               `json:"worker_id"`
+	PreviousWorker      string               `json:"previous_worker,omitempty"`
+	NextWorker          string               `json:"next_worker,omitempty"`
+	AssignmentID        string               `json:"assignment_id"`
+	JobID               string               `json:"job_id"`
+	ModelID             string               `json:"model_id"`
+	ShardID             string               `json:"shard_id"`
+	Phase               InferencePhase       `json:"phase,omitempty"`
+	SequenceID          string               `json:"sequence_id,omitempty"`
+	Position            uint32               `json:"position,omitempty"`
+	PassOrdinal         uint64               `json:"pass_ordinal"`
+	KVTokenOffset       uint32               `json:"kv_token_offset"`
+	TokenCount          uint32               `json:"token_count"`
+	InputTensor         *TensorDescriptor    `json:"input_tensor,omitempty"`
+	OutputTensor        *TensorDescriptor    `json:"output_tensor,omitempty"`
+	Prompt              string               `json:"prompt,omitempty"`
+	InputTokenIDs       []uint32             `json:"input_token_ids,omitempty"`
+	Activation          *activation.Envelope `json:"activation,omitempty"`
+	FinalShard          bool                 `json:"final_shard,omitempty"`
+	LayerStart          int                  `json:"layer_start"`
+	LayerEnd            int                  `json:"layer_end"`
+	Sequence            uint64               `json:"sequence"`
+	Payload             []byte               `json:"payload"`
+}
+
+// TensorDescriptor is transport metadata only. execution.BuildRequest turns
+// it into the backend-independent tensor contract before native execution.
+type TensorDescriptor struct {
+	DType      string  `json:"dtype"`
+	Shape      []int64 `json:"shape"`
+	Layout     string  `json:"layout"`
+	ByteOrder  string  `json:"byte_order"`
+	ByteLength uint64  `json:"byte_length"`
 }
 
 type JobAccepted struct {
@@ -135,22 +147,22 @@ type JobAccepted struct {
 }
 
 type JobComplete struct {
-	AssignmentID   string               `json:"assignment_id"`
-	JobID          string               `json:"job_id"`
-	WorkerID       string               `json:"worker_id"`
-	Status         string               `json:"status"`
-	Output         []byte               `json:"output"`
-	SequenceID     string               `json:"sequence_id,omitempty"`
-	Position       uint32               `json:"position,omitempty"`
-	PassOrdinal    uint64               `json:"pass_ordinal"`
-	KVTokenOffsetBefore uint32          `json:"kv_token_offset_before"`
-	KVTokenOffsetAfter  uint32          `json:"kv_token_offset_after"`
-	Activation     *activation.Envelope `json:"activation,omitempty"`
-	SampledTokenID *uint32              `json:"sampled_token_id,omitempty"`
-	EndOfSequence  bool                 `json:"end_of_sequence,omitempty"`
-	GeneratedText  []byte               `json:"generated_text,omitempty"`
-	TokensPerSec   float64              `json:"tokens_per_second,omitempty"`
-	LayerCount     int                  `json:"layer_count,omitempty"`
+	AssignmentID        string               `json:"assignment_id"`
+	JobID               string               `json:"job_id"`
+	WorkerID            string               `json:"worker_id"`
+	Status              string               `json:"status"`
+	Output              []byte               `json:"output"`
+	SequenceID          string               `json:"sequence_id,omitempty"`
+	Position            uint32               `json:"position,omitempty"`
+	PassOrdinal         uint64               `json:"pass_ordinal"`
+	KVTokenOffsetBefore uint32               `json:"kv_token_offset_before"`
+	KVTokenOffsetAfter  uint32               `json:"kv_token_offset_after"`
+	Activation          *activation.Envelope `json:"activation,omitempty"`
+	SampledTokenID      *uint32              `json:"sampled_token_id,omitempty"`
+	EndOfSequence       bool                 `json:"end_of_sequence,omitempty"`
+	GeneratedText       []byte               `json:"generated_text,omitempty"`
+	TokensPerSec        float64              `json:"tokens_per_second,omitempty"`
+	LayerCount          int                  `json:"layer_count,omitempty"`
 }
 
 type JobFailed struct {
