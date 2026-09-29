@@ -10,7 +10,7 @@ import com.intellihive.worker.service.WorkerJobAssignment
  */
 class NativeTransportShardExecutor(
     private val native: NativeShardExecutor
-) : TransportExecutor {
+) : TransportExecutor, AutoCloseable {
     override suspend fun execute(assignment: WorkerJobAssignment): TransportResult {
         assignment.validate()?.let { throw IllegalArgumentException(it) }
         val request = WorkerAssignmentAdapter.toExecutionRequest(assignment)
@@ -29,6 +29,10 @@ class NativeTransportShardExecutor(
 
     override suspend fun endSequence(jobId: String, sequenceId: String, completed: Boolean) =
         native.endSequence(jobId, sequenceId, completed)
+
+    override fun close() {
+        (native as? AutoCloseable)?.close()
+    }
 
     private fun activationResult(
         assignment: WorkerJobAssignment,
@@ -60,9 +64,9 @@ class NativeTransportShardExecutor(
     }
 }
 
-class UnavailableNativeShardExecutor : NativeShardExecutor {
+class UnavailableNativeShardExecutor(private val reason: String) : NativeShardExecutor {
     override suspend fun execute(request: ShardExecutionRequest): NativeShardExecutionResult =
-        throw UnsupportedOperationException("IntelHive native shard executor is not built into this Android app")
+        throw UnsupportedOperationException("IntelHive native shard executor unavailable: $reason")
 
     override suspend fun endSequence(jobId: String, sequenceId: String, completed: Boolean) = Unit
 }

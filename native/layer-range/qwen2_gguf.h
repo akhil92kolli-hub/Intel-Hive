@@ -54,6 +54,7 @@ public:
 
     const Qwen2Config& config() const;
     std::vector<float> embed_token(uint32_t token_id) const;
+    std::vector<float> project_logits(const std::vector<float>& hidden_state) const;
     const std::string& path() const;
 
 private:

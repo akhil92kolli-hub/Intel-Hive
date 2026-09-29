@@ -34,18 +34,26 @@ ModelMetadata
 
 ## Qwen2.5 3B Requirements
 
-For Qwen2.5-3B-Instruct, the eventual metadata should support:
+For Qwen2.5-3B and Qwen2.5-3B-Instruct, the architecture metadata is:
 
 ```text
 layer_count = 36
-embedding_length = 3072
-attention_heads = 24
-kv_heads = 8
+embedding_length = 2048
+feed_forward_length = 11008
+attention_heads = 16
+attention_head_dim = 128
+kv_heads = 2
 context_length = 32768
-vocab_size = 152064
+vocab_size = 151936
 architecture = qwen2
 quantization = Q4_K_M
 ```
+
+These dimensions match the official Qwen2.5-3B and Qwen2.5-3B-Instruct
+configuration (`hidden_size=2048`, `intermediate_size=11008`,
+`num_hidden_layers=36`, `num_attention_heads=16`, `num_key_value_heads=2`,
+and `vocab_size=151936`). GGUF tensor metadata remains authoritative for a
+specific quantized artifact.
 
 This lets the system create:
 
@@ -108,11 +116,13 @@ Later, a dedicated GGUF parser can read the model header and extract the same fi
   "architecture": "qwen2",
   "parameter_count": 3000000000,
   "context_length": 32768,
-  "embedding_length": 3072,
+  "embedding_length": 2048,
   "layer_count": 36,
-  "attention_heads": 24,
-  "kv_heads": 8,
-  "vocab_size": 152064,
+  "feed_forward_length": 11008,
+  "attention_heads": 16,
+  "attention_head_dim": 128,
+  "kv_heads": 2,
+  "vocab_size": 151936,
   "tensor_count": 512,
   "quantization": "Q4_K_M"
 }

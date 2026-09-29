@@ -22,10 +22,8 @@ android {
 
         externalNativeBuild {
             cmake {
-                arguments += listOf(
-                    "-DINTELHIVE_LLAMA_SOURCE_DIR=" + providers.gradleProperty("intelhive.llamaSourceDir")
-                        .orElse(rootProject.file("../.devtools/llama-source").absolutePath).get()
-                )
+                arguments += "-DINTELHIVE_LLAMA_SOURCE_DIR=" + providers.gradleProperty("intelhive.llamaSourceDir")
+                    .orElse(rootProject.file("../.devtools/llama-source").absolutePath).get()
                 cppFlags += "-std=c++17"
             }
         }
@@ -69,5 +67,6 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3")
     testImplementation("junit:junit:4.13.2")
     androidTestImplementation("androidx.test.ext:junit:1.1.5")
+    androidTestImplementation("androidx.test:core:1.5.0")
     androidTestImplementation("androidx.test.espresso:espresso-core:3.5.1")
 }

@@ -26,11 +26,11 @@ over a local network.
 
 The scheduler assigns logical layer shards to workers. The initial scheduler
 must remain deterministic and capability-based; it is not an AI/LLM scheduler.
-For a 30-layer example, the demonstration should show:
+For the 36-layer Qwen2.5-3B Phase-0 model, the demonstration should show:
 
 ```text
 Phone A              Phone B              Phone C
-Layers 0–9           Layers 10–19         Layers 20–29
+Layers 0–11          Layers 12–23         Layers 24–35
     │                     │                     │
     └──── activation ────►└──── activation ────►
                                                    │
@@ -57,6 +57,7 @@ to the client.
 | T009 | Mock distributed inference | M1 |
 | T010 | Scheduler Core | M1 |
 | T011 | Dynamic Worker Assignment | M1 initial deterministic assignment; M2 failure-time reassignment |
+| T013A | Host-side Qwen2.5-3B GGUF shard execution and split-vs-full parity | M1 |
 | T013 | Android llama.cpp native integration | M1 |
 | T014 | Android GPU/backend integration | M1 |
 | T015 | Real-device hardware benchmark | M1 |
@@ -69,15 +70,26 @@ that capability to reassign a shard after a worker failure. T012 is the
 failure/reconnection foundation for M2.
 
 T002A and T002B define the Android-side engine and activation contracts. T002C
-now has a native ggml feasibility prototype under `native/layer-range`: it
-builds and verifies split-range equivalence, prefill/decode KV positions, and
-sequence reset using deterministic synthetic weights. This proves that
-IntelHive can own partial-graph boundaries around ggml; it does not load GGUF
-weights or execute Qwen, and does not complete Android native inference. The
-scheduler owns pipeline assignment; IntelHive's worker runtime owns local
-shard execution and sequence state, while llama.cpp/ggml is only a local
-compute backend. M1 remains blocked on a real model-weight loader and Android
-backend integration (T013 onward).
+has a native ggml feasibility prototype under `native/layer-range`. T013A adds
+a host-side Qwen2 GGUF loader and layer-range executor. Its real-weight test now
+compares a three-shard pipeline against both IntelHive's full-range executor
+and the pinned llama.cpp full-model reference over a three-token prefill and
+three decode steps. The test requires exact greedy-token agreement, a maximum
+absolute logit error of 0.75, and a maximum first-layer activation error of
+0.02; the fixed test sequence currently measures 0.605501 maximum logit error
+and 0.014194 maximum first-layer activation error. The three-shard/full-range
+hidden-state and logits comparison remains stricter at 1e-4. These are host
+CPU measurements for the verified Qwen2.5-3B-Instruct Q4_K_M GGUF, not
+per-device Android requirements or a general guarantee for other prompts,
+GGUF quantizations, backends, or model architectures.
+
+The independent CPU reference check gives a **GO for the host layer-range
+execution approach** on this model and pinned llama.cpp revision. M1 remains
+incomplete: the host test does not implement tokenizer-driven text generation
+or integrate with Android. The scheduler owns pipeline assignment; IntelHive's
+worker runtime owns local shard execution and sequence state, while llama.cpp/
+ggml is only a local compute backend. Android native/backend integration and
+real-device tests (T013 onward) remain required for M1.
 
 ### M2 — Worker failure and replacement
 

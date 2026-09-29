@@ -18,6 +18,8 @@ import android.os.IBinder
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import com.intellihive.worker.MainActivity
+import com.intellihive.worker.inference.NativeLayerRangeShardExecutor
+import com.intellihive.worker.inference.NativeRuntime
 import com.intellihive.worker.inference.NativeTransportShardExecutor
 import com.intellihive.worker.inference.UnavailableNativeShardExecutor
 import kotlinx.coroutines.CoroutineScope
@@ -48,8 +50,8 @@ class WorkerService : Service() {
     private var workerId: String = ""
     private var heartbeatIntervalSeconds = DEFAULT_HEARTBEAT_SECONDS
     private var registered = false
-    private val assignmentExecutor: ShardExecutor =
-        NativeTransportShardExecutor(UnavailableNativeShardExecutor())
+    private val assignmentExecutorLock = Any()
+    private var assignmentExecutor: ShardExecutor? = null
     private val executionMutex = Mutex()
     private val activeAssignments = HashSet<String>()
 
@@ -95,6 +97,10 @@ class WorkerService : Service() {
         client?.dispatcher?.cancelAll()
         client = null
         serviceScope.cancel()
+        synchronized(assignmentExecutorLock) {
+            (assignmentExecutor as? AutoCloseable)?.close()
+            assignmentExecutor = null
+        }
         reportStatus("Worker disconnected", connected = false)
         stopForeground(STOP_FOREGROUND_REMOVE)
         super.onDestroy()
@@ -215,7 +221,7 @@ class WorkerService : Service() {
         serviceScope.launch {
             try {
                 executionMutex.withLock {
-                    val result = assignmentExecutor.execute(assignment)
+                    val result = assignmentExecutor().execute(assignment)
                     validateExecutionResult(assignment, result)?.let { error ->
                         throw IllegalStateException(error)
                     }
@@ -267,7 +273,7 @@ class WorkerService : Service() {
         serviceScope.launch {
             try {
                 executionMutex.withLock {
-                    assignmentExecutor.endSequence(jobId, sequenceId, completed)
+                    assignmentExecutor?.endSequence(jobId, sequenceId, completed)
                 }
             } catch (error: kotlinx.coroutines.CancellationException) {
                 throw error
@@ -330,6 +336,18 @@ class WorkerService : Service() {
                 WorkerEnvelope(type, workerProtocolGson.toJsonTree(payload))
             )
         )
+
+    private fun assignmentExecutor(): ShardExecutor = synchronized(assignmentExecutorLock) {
+        assignmentExecutor ?: NativeTransportShardExecutor(
+            if (NativeRuntime.isAvailable()) {
+                NativeLayerRangeShardExecutor(this)
+            } else {
+                UnavailableNativeShardExecutor(
+                    NativeRuntime.unavailableReason() ?: "native runtime is unavailable"
+                )
+            }
+        ).also { assignmentExecutor = it }
+    }
 
     private fun registrationPayload(): JSONObject {
         val activityManager = getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager

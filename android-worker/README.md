@@ -3,9 +3,10 @@
 ## Overview
 
 The Android worker is a Kotlin application with a scheduler WebSocket runtime,
-an IntelHive-owned shard inference contract, and a separate full-model
-llama.cpp benchmark adapter. The native layer-range backend is not implemented
-yet.
+an IntelHive-owned shard inference contract, and a JNI adapter for IntelHive's
+Qwen2 layer-range executor. The shard executor uses the same pinned llama.cpp
+source revision as the host feasibility tests. The full-model llama.cpp
+benchmark adapter remains separate and is not used for shard execution.
 
 ## Architecture
 
@@ -25,6 +26,8 @@ AndroidWorker
 │   ├── layer execution
 │   ├── KV cache management
 │   └── metrics collection
+├── NativeLayerRangeShardExecutor
+│   └── transport-neutral contract → JNI → IntelHive Qwen2 layer-range engine
 ├── LlamaCppBenchmarkEngine
 │   └── full-model local benchmark only; not a shard executor
 │
@@ -57,36 +60,70 @@ AndroidWorker
   inputs, report completion/failure, and release per-sequence state
 
 The runtime reports the device as `UNBENCHMARKED` until inference benchmarking
-has completed. It currently does not execute remotely assigned model shards.
-Run the Go gateway from `server/` and enter its WebSocket URL in the app. The
-debug build permits `ws://` for LAN testing; use only a trusted local network.
-The worker service now consumes the scheduler's assignment/result protocol,
-but the native layer-shard executor is not implemented yet. Until that backend
-is available, assignments are acknowledged and then explicitly failed rather
-than returning mock inference results.
+has completed. With the pinned model installed, the JNI runtime can execute
+Qwen2.5-3B layer shards and marshal activation/token results to the worker
+contract. Run the Go gateway from `server/` and enter its WebSocket URL in the
+app. The debug build permits `ws://` for LAN testing; use only a trusted local
+network.
 
 The typed Android contract carries model/version and inclusive layer-range
 metadata, prefill/decode sequence identity, activation tensor metadata, and
 payload checksums. WebSocket assignments now carry the complete activation
 envelope, including request identity, worker route, pass position, dtype,
 shape, and checksum. The Android worker validates this envelope before handing
-it to an executor. The executor remains unavailable until the native backend
-is integrated, so this protocol work does not meet M1.
+it to the native executor. The current Android backend supports only the
+pinned Qwen2.5-3B Q4_K_M model, F32 row-major activations, and CPU execution.
+It does not yet establish networked multi-phone M1, GPU acceleration, generic
+GGUF/architecture support, or KV-state migration. The instrumented three-shard
+test runs the ranges sequentially on one Android device and tests prefill plus
+one decode step.
 
 ## Build
 
+The app pins Android NDK `26.3.11579264` and CMake `3.22.1`, and builds only
+`arm64-v8a`. Provide the llama.cpp checkout or extracted source at the revision
+recorded in `native/layer-range/upstream.lock`. By default Gradle expects it at
+`.devtools/llama-source` relative to the repository root; override that path
+with `-Pintelhive.llamaSourceDir=/absolute/path/to/llama.cpp`.
+
 ```bash
-cd android-worker
-./gradlew assembleDebug
+gradle -p android-worker \
+  -Pintelhive.llamaSourceDir="$PWD/.devtools/llama-source" \
+  :app:assembleDebug
 ```
+
+The JNI load-probe test checks that the packaged library can load and initialize
+llama.cpp. To run it on a connected arm64 device:
+
+```bash
+gradle -p android-worker \
+  -Pintelhive.llamaSourceDir="$PWD/.devtools/llama-source" \
+  :app:connectedDebugAndroidTest
+```
+
+The instrumentation suite also contains a real-weight test. It is skipped when
+the expected GGUF is not installed on the device.
 
 ## Model Setup
 
-Place the quantized GGUF model in `android-worker/app/src/main/assets/models/`:
+For the real-weight instrumentation test, push the verified Qwen2.5-3B-Instruct
+Q4_K_M GGUF into the app-specific external files directory:
 
 ```
-qwen2.5-3b-instruct-q4_k_m.gguf (~2.2 GB)
+adb shell mkdir -p /sdcard/Android/data/com.intelhive.worker/files/models
+adb push qwen2.5-3b-instruct-q4_k_m.gguf \
+  /sdcard/Android/data/com.intelhive.worker/files/models/qwen2.5-3b-instruct-q4_k_m.gguf
 ```
+
+The instrumented test uses that external-file copy directly, avoiding a second
+multi-gigabyte copy. The worker service itself loads the model from its private
+cache at `cache/models/qwen2.5-3b-instruct-q4_k_m.gguf`.
+
+The executor hashes the complete model file before loading it. The expected
+SHA-256 is
+`626b4a6678b86442240e33df819e00132d3ba7dddfe1cdc4fbb18e0a9615c62d`; the GGUF
+must report 36 layers and hidden size 2048. Use only a model artifact with this
+digest. The large model file is intentionally not checked into the repository.
 
 ## Benchmark Output
 

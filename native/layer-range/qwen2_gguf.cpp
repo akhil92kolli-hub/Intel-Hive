@@ -163,6 +163,35 @@ struct Qwen2GgufModel::Impl {
         return tensor;
     }
 
+    ggml_tensor* map_optional_vector(
+            ggml_context* context,
+            const std::string& name,
+            int64_t length) const {
+        const int64_t id = gguf_find_tensor(metadata, name.c_str());
+        if (id < 0) return nullptr;
+
+        const int64_t* shape = gguf_get_tensor_ne(metadata, id);
+        if (shape[0] != length || shape[1] != 1 || shape[2] != 1 || shape[3] != 1) {
+            throw std::runtime_error("GGUF tensor shape mismatch: " + name);
+        }
+
+        const size_t data_offset = gguf_get_data_offset(metadata);
+        const size_t tensor_offset = gguf_get_tensor_offset(metadata, id);
+        const size_t bytes = gguf_get_tensor_size(metadata, id);
+        if (tensor_offset > mapped_size || data_offset > mapped_size - tensor_offset ||
+            bytes > mapped_size - data_offset - tensor_offset) {
+            throw std::runtime_error("GGUF tensor data lies outside the model file: " + name);
+        }
+
+        auto* tensor = ggml_new_tensor_1d(context, gguf_get_tensor_type(metadata, id), length);
+        if (ggml_nbytes(tensor) != bytes) {
+            throw std::runtime_error("GGUF tensor byte size mismatch: " + name);
+        }
+        tensor->data = const_cast<uint8_t*>(mapped_data + data_offset + tensor_offset);
+        ggml_set_name(tensor, name.c_str());
+        return tensor;
+    }
+
     std::string model_path;
     int file_descriptor = -1;
     const uint8_t* mapped_data = nullptr;
@@ -175,8 +204,11 @@ struct Qwen2GgufShard::Impl {
     struct LayerWeights {
         ggml_tensor* attention_norm;
         ggml_tensor* query;
+        ggml_tensor* query_bias;
         ggml_tensor* key;
+        ggml_tensor* key_bias;
         ggml_tensor* value;
+        ggml_tensor* value_bias;
         ggml_tensor* attention_output;
         ggml_tensor* feed_forward_norm;
         ggml_tensor* feed_forward_gate;
@@ -219,6 +251,9 @@ struct Qwen2GgufShard::Impl {
         auto* query = ggml_mul_mat(ctx, weights.query, attention_norm);
         auto* key = ggml_mul_mat(ctx, weights.key, attention_norm);
         auto* value = ggml_mul_mat(ctx, weights.value, attention_norm);
+        if (weights.query_bias != nullptr) query = ggml_add(ctx, query, weights.query_bias);
+        if (weights.key_bias != nullptr) key = ggml_add(ctx, key, weights.key_bias);
+        if (weights.value_bias != nullptr) value = ggml_add(ctx, value, weights.value_bias);
         query = ggml_reshape_3d(ctx, query, head_dimension, config.attention_heads, 1);
         key = ggml_reshape_3d(ctx, key, head_dimension, config.kv_heads, 1);
         value = ggml_reshape_3d(ctx, value, head_dimension, config.kv_heads, 1);
@@ -228,10 +263,10 @@ struct Qwen2GgufShard::Impl {
         constexpr float rope_attention = 1.0f;
         constexpr float rope_beta_fast = 32.0f;
         constexpr float rope_beta_slow = 1.0f;
-        query = ggml_rope_ext(ctx, query, positions, nullptr, head_dimension, GGML_ROPE_TYPE_NORMAL,
+        query = ggml_rope_ext(ctx, query, positions, nullptr, head_dimension, GGML_ROPE_TYPE_NEOX,
             config.context_length, config.rope_frequency_base, rope_scale, rope_extension,
             rope_attention, rope_beta_fast, rope_beta_slow);
-        key = ggml_rope_ext(ctx, key, positions, nullptr, head_dimension, GGML_ROPE_TYPE_NORMAL,
+        key = ggml_rope_ext(ctx, key, positions, nullptr, head_dimension, GGML_ROPE_TYPE_NEOX,
             config.context_length, config.rope_frequency_base, rope_scale, rope_extension,
             rope_attention, rope_beta_fast, rope_beta_slow);
 
@@ -255,10 +290,32 @@ struct Qwen2GgufShard::Impl {
         if (v_for_attention->type == GGML_TYPE_F32) {
             v_for_attention = ggml_cast(ctx, v_for_attention, GGML_TYPE_F16);
         }
-        auto* attended = ggml_flash_attn_ext(ctx, q_for_attention, k_for_attention,
-            v_for_attention, nullptr, 1.0f / std::sqrt(static_cast<float>(head_dimension)), 0.0f, 0.0f);
-        ggml_prec_set_acc(attended, GGML_PREC_F32);
-        attended = ggml_reshape_2d(ctx, attended, config.embedding_size, 1);
+        if (k_for_attention->ne[0] != q_for_attention->ne[0] ||
+            q_for_attention->ne[2] % k_for_attention->ne[2] != 0 ||
+            q_for_attention->ne[3] % k_for_attention->ne[3] != 0) {
+            throw std::runtime_error("Qwen2 attention score shapes are incompatible: k=[" +
+                std::to_string(k_for_attention->ne[0]) + "," +
+                std::to_string(k_for_attention->ne[1]) + "," +
+                std::to_string(k_for_attention->ne[2]) + "," +
+                std::to_string(k_for_attention->ne[3]) + "], q=[" +
+                std::to_string(q_for_attention->ne[0]) + "," +
+                std::to_string(q_for_attention->ne[1]) + "," +
+                std::to_string(q_for_attention->ne[2]) + "," +
+                std::to_string(q_for_attention->ne[3]) + "]");
+        }
+        auto* attention_scores = ggml_mul_mat(ctx, k_for_attention, q_for_attention);
+        ggml_prec_set_acc(attention_scores, GGML_PREC_F32);
+        auto* attention_probabilities = ggml_soft_max_ext(ctx, attention_scores, nullptr,
+            1.0f / std::sqrt(static_cast<float>(head_dimension)), 0.0f);
+        v_for_attention = ggml_cont(ctx, ggml_transpose(ctx, v_for_attention));
+        if (v_for_attention->ne[0] != attention_probabilities->ne[0] ||
+            attention_probabilities->ne[2] % v_for_attention->ne[2] != 0 ||
+            attention_probabilities->ne[3] % v_for_attention->ne[3] != 0) {
+            throw std::runtime_error("Qwen2 attention value shapes are incompatible");
+        }
+        auto* attention_values = ggml_mul_mat(ctx, v_for_attention, attention_probabilities);
+        auto* attended = ggml_permute(ctx, attention_values, 0, 3, 1, 2);
+        attended = ggml_cont_2d(ctx, attended, config.embedding_size, 1);
 
         auto* attention_output = ggml_mul_mat(ctx, weights.attention_output, attended);
         auto* attention_residual = ggml_add(ctx, residual_input, attention_output);
@@ -320,6 +377,39 @@ std::vector<float> Qwen2GgufModel::embed_token(uint32_t token_id) const {
     return {data, data + impl_->config.embedding_size};
 }
 
+std::vector<float> Qwen2GgufModel::project_logits(const std::vector<float>& hidden_state) const {
+    const auto& config = impl_->config;
+    if (hidden_state.size() != static_cast<size_t>(config.embedding_size)) {
+        throw std::invalid_argument("final hidden state does not match Qwen2 embedding size");
+    }
+    for (float value : hidden_state) {
+        if (!std::isfinite(value)) throw std::invalid_argument("final hidden state contains a non-finite value");
+    }
+
+    auto weight_context = create_context(2 * 1024 * 1024, true);
+    auto* output_norm = impl_->map_tensor(weight_context.get(), "output_norm.weight",
+        config.embedding_size, 1);
+    const int64_t output_id = gguf_find_tensor(impl_->metadata, "output.weight");
+    const std::string output_name = output_id >= 0 ? "output.weight" : "token_embd.weight";
+    auto* output_weight = impl_->map_tensor(weight_context.get(), output_name,
+        config.embedding_size, config.vocabulary_size);
+
+    auto graph_context = create_context(8 * 1024 * 1024);
+    auto* hidden = ggml_new_tensor_1d(graph_context.get(), GGML_TYPE_F32, config.embedding_size);
+    std::memcpy(hidden->data, hidden_state.data(), hidden_state.size() * sizeof(float));
+    auto* normalized = ggml_mul(graph_context.get(),
+        ggml_rms_norm(graph_context.get(), hidden, config.rms_norm_epsilon), output_norm);
+    auto* logits = ggml_mul_mat(graph_context.get(), output_weight, normalized);
+    const int64_t output_bias_id = gguf_find_tensor(impl_->metadata, "output.bias");
+    if (output_bias_id >= 0) {
+        auto* output_bias = impl_->map_tensor(weight_context.get(), "output.bias", config.vocabulary_size, 1);
+        logits = ggml_add(graph_context.get(), logits, output_bias);
+    }
+    run_graph(graph_context.get(), logits);
+    const auto* data = static_cast<const float*>(logits->data);
+    return {data, data + config.vocabulary_size};
+}
+
 Qwen2GgufShard::Qwen2GgufShard(
         std::shared_ptr<const Qwen2GgufModel> model,
         int32_t first_layer,
@@ -347,10 +437,16 @@ Qwen2GgufShard::Qwen2GgufShard(
                 config.embedding_size, 1),
             model_impl.map_tensor(impl_->weights_context.get(), prefix + "attn_q.weight",
                 config.embedding_size, config.embedding_size),
+            model_impl.map_optional_vector(impl_->weights_context.get(), prefix + "attn_q.bias",
+                config.embedding_size),
             model_impl.map_tensor(impl_->weights_context.get(), prefix + "attn_k.weight",
                 config.embedding_size, key_value_width),
+            model_impl.map_optional_vector(impl_->weights_context.get(), prefix + "attn_k.bias",
+                key_value_width),
             model_impl.map_tensor(impl_->weights_context.get(), prefix + "attn_v.weight",
                 config.embedding_size, key_value_width),
+            model_impl.map_optional_vector(impl_->weights_context.get(), prefix + "attn_v.bias",
+                key_value_width),
             model_impl.map_tensor(impl_->weights_context.get(), prefix + "attn_output.weight",
                 config.embedding_size, config.embedding_size),
             model_impl.map_tensor(impl_->weights_context.get(), prefix + "ffn_norm.weight",
@@ -366,8 +462,11 @@ Qwen2GgufShard::Qwen2GgufShard(
             layer_weights.attention_norm, layer_weights.query, layer_weights.key, layer_weights.value,
             layer_weights.attention_output, layer_weights.feed_forward_norm,
             layer_weights.feed_forward_gate, layer_weights.feed_forward_up, layer_weights.feed_forward_down,
+            layer_weights.query_bias, layer_weights.key_bias, layer_weights.value_bias,
         };
-        for (const auto* tensor : tensors) impl_->weight_bytes += ggml_nbytes(tensor);
+        for (const auto* tensor : tensors) {
+            if (tensor != nullptr) impl_->weight_bytes += ggml_nbytes(tensor);
+        }
         impl_->weights.push_back(layer_weights);
     }
 }

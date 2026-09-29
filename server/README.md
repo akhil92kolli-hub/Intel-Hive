@@ -23,9 +23,8 @@ The gateway listens on `:8080` by default. Set `LISTEN_ADDR` to override it.
 {"model_id":"qwen2.5-3b-instruct","prompt":"Hello","max_tokens":32}
 ```
 
-The server currently supports the Phase-0 Qwen model IDs and layer counts
-(`qwen2.5-3b-instruct`: 30 layers, `qwen2.5-3b`: 36 layers), and requires the
-complete shard partition to be advertised by connected workers. A
+The server currently supports the Phase-0 Qwen model IDs, both with 36 layers.
+It requires the complete shard partition to be advertised by connected workers. A
 successful response contains the job ID, generated output text when supplied
 by the final worker, generated token IDs, and basic timing metrics.
 `max_tokens` defaults to 32 and must be between 1 and 256. Inference requests

@@ -138,10 +138,6 @@ interface ShardExecutor {
     suspend fun endSequence(jobId: String, sequenceId: String, completed: Boolean)
 }
 
-/**
- * The native layer-range executor is not present yet. Reject assignments
- * rather than returning success-shaped mock inference results.
- */
 internal val workerProtocolGson = GsonBuilder()
     .registerTypeAdapter(ByteArray::class.java, object : TypeAdapter<ByteArray>() {
         override fun write(out: JsonWriter, value: ByteArray) { out.value(Base64.getEncoder().encodeToString(value)) }

@@ -1,5 +1,3 @@
 repository=https://github.com/ggml-org/llama.cpp.git
-# Replace with the exact 40-character commit of the checked-out llama.cpp source.
-# CMake rejects this placeholder so an extracted tree cannot accidentally inherit
-# Intel-Hive's parent .git revision.
-revision=UNPINNED
+# llama.cpp commit validated for the T013A host executor.
+revision=f30a8a5689f95bb11bce9c450feb5ac86094539e

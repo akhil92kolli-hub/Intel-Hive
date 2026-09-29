@@ -3,11 +3,13 @@
   "architecture": "qwen2",
   "parameter_count": 3000000000,
   "context_length": 32768,
-  "embedding_length": 3072,
+  "embedding_length": 2048,
   "layer_count": 36,
-  "attention_heads": 24,
-  "kv_heads": 8,
-  "vocab_size": 152064,
+  "feed_forward_length": 11008,
+  "attention_heads": 16,
+  "kv_heads": 2,
+  "attention_head_dim": 128,
+  "vocab_size": 151936,
   "tensor_count": 512,
   "quantization": "Q4_K_M"
 }
