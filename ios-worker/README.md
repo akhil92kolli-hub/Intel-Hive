@@ -7,6 +7,7 @@ The iOS worker mirrors the Android Phase-0 worker while using native iOS APIs:
 - Metal capability discovery (with CPU fallback)
 - A backend-neutral inference interface ready for llama.cpp/ggml Metal bindings
 - A benchmark JSON schema compatible with the Android benchmark output
+- Supabase model-manifest delivery and append-only benchmark ingestion
 
 ## Requirements
 
@@ -79,10 +80,22 @@ swift test
 
 The Swift package is ready to be added to an iOS app for scheduler registration
 and heartbeat validation. It includes `RequiredModelManager`, which loads the
-bundled canonical Qwen catalog or a configurable HTTPS manifest, rejects any
+Supabase-hosted canonical Qwen manifest by default, or a bundled/configurable
+HTTPS manifest, rejects any
 model identity/dimension/digest/size mismatch, verifies complete file size and
 SHA-256, and installs only verified artifacts under Application Support. The
 GGUF is never bundled into the app.
+
+The default public manifest is:
+
+```text
+https://uozyxansakogtpqxcpdp.supabase.co/storage/v1/object/public/model-artifacts/manifests/qwen2.5-3b-instruct/1.0.0/manifest.json
+```
+
+The manifest currently points to the verified upstream GGUF because the 2.1 GB
+artifact exceeds the Supabase project's current 50 MB Storage limit. Once that
+limit is raised and the uploaded object is verified, both Android and iOS can
+use the same Supabase Storage object without application code changes.
 
 The app host should use a background `URLSessionDownloadTask` to provide the
 first-launch UI, progress, cancellation, and resume-data handling. Configure
@@ -113,6 +126,33 @@ The next iOS implementation sequence is:
 ## Inference backend
 
 `InferenceEngine` intentionally contains no vendored model binary or third-party native code. Connect the llama.cpp iOS/Metal bridge by implementing `InferenceBackend` and pass it to `BenchmarkService`. This keeps model licensing, binary size, and upstream llama.cpp updates separate from the worker protocol.
+
+## Supabase benchmark storage
+
+`BenchmarkService` writes every completed benchmark JSON document under the
+app's cache directory before attempting its network upload. It then inserts a
+normalized `platform = ios` row into `public.benchmark_results`. Upload failure
+does not remove the local result and is available through
+`lastUploadFailure()`; the saved file URL is available through
+`lastSavedResultURL()`.
+
+The package contains only the public publishable key. Supabase Row Level
+Security allows inserts for the pinned model artifact and denies mobile-client
+reads, updates, and deletes. A host app can supply a different project or
+disable upload:
+
+```swift
+let configured = BenchmarkService(
+    engine: engine,
+    supabase: SupabaseConfiguration(
+        projectURL: URL(string: "https://project-ref.supabase.co")!,
+        publishableKey: "sb_publishable_example",
+        modelManifestURL: URL(string: "https://example.test/manifest.json")!
+    )
+)
+
+let localOnly = BenchmarkService(engine: engine, supabase: nil)
+```
 
 ## App lifecycle
 

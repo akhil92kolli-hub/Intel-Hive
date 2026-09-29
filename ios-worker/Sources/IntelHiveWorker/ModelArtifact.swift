@@ -77,6 +77,7 @@ public struct RequiredModelManifest: Sendable, Equatable {
 
 public enum ModelManifestSource: Sendable {
     case bundled
+    case supabase(SupabaseConfiguration = .intelHive)
     case remote(URL)
 }
 
@@ -130,23 +131,16 @@ public actor RequiredModelManager {
         self.storageDirectory = storageDirectory ?? Self.defaultStorageDirectory(fileManager: fileManager)
     }
 
-    public func loadManifest(from source: ModelManifestSource = .bundled) async throws -> RequiredModelManifest {
+    public func loadManifest(
+        from source: ModelManifestSource = .supabase()
+    ) async throws -> RequiredModelManifest {
         switch source {
         case .bundled:
             return try RequiredModelManifest.bundled()
+        case .supabase(let configuration):
+            return try await loadRemoteManifest(from: configuration.modelManifestURL)
         case .remote(let url):
-            guard url.scheme?.lowercased() == "https", url.host != nil else {
-                throw ModelArtifactError.invalidManifest("configured manifest URL must use HTTPS")
-            }
-            let (data, response) = try await session.data(from: url)
-            guard let response = response as? HTTPURLResponse,
-                  (200...299).contains(response.statusCode) else {
-                throw ModelArtifactError.invalidManifestResponse
-            }
-            guard data.count <= Self.maximumManifestBytes else {
-                throw ModelArtifactError.manifestTooLarge
-            }
-            return try RequiredModelManifest.decode(data)
+            return try await loadRemoteManifest(from: url)
         }
     }
 
@@ -212,6 +206,24 @@ public actor RequiredModelManager {
             return
         }
         try fileManager.createDirectory(at: storageDirectory, withIntermediateDirectories: true)
+    }
+
+    private func loadRemoteManifest(from url: URL) async throws -> RequiredModelManifest {
+        guard url.scheme?.lowercased() == "https", url.host != nil else {
+            throw ModelArtifactError.invalidManifest("configured manifest URL must use HTTPS")
+        }
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 30
+        let (data, response) = try await session.data(for: request)
+        guard let response = response as? HTTPURLResponse,
+              (200...299).contains(response.statusCode) else {
+            throw ModelArtifactError.invalidManifestResponse
+        }
+        guard response.expectedContentLength <= Self.maximumManifestBytes,
+              data.count <= Self.maximumManifestBytes else {
+            throw ModelArtifactError.manifestTooLarge
+        }
+        return try RequiredModelManifest.decode(data)
     }
 
     private func verify(file: URL, against manifest: RequiredModelManifest) throws {

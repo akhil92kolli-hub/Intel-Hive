@@ -1,6 +1,6 @@
 # IntelHive Supabase backend
 
-Supabase provides two narrow services for IntelHive:
+Supabase provides two narrow services for the Android and iOS workers:
 
 - append-only mobile benchmark ingestion through `public.benchmark_results`;
 - public model manifests and, when the project permits the object size, GGUF
@@ -17,8 +17,9 @@ but cannot select, update, or delete them. Administrative reporting must use a
 trusted server-side credential outside the mobile app.
 
 The public publishable key is safe to include in an APK because authorization
-is enforced by grants, constraints, and RLS. Never commit a personal access
-token, secret key, or service-role key.
+is enforced by grants, constraints, and RLS. The same rule applies to the iOS
+app bundle. Never commit a personal access token, secret key, or service-role
+key.
 
 ## Model artifacts
 
