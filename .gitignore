@@ -1,0 +1,36 @@
+# Build artifacts and local state
+.build/
+.gradle/
+build/
+.devtools/
+.idea/
+*.iml
+*.apk
+*.aab
+
+# Frontend generated output
+IntelHive-website/node_modules/
+IntelHive-website/dist/
+IntelHive-website/.wrangler/
+IntelHive-website/.vite/
+
+# Go
+/bin/
+/dist/
+*.test
+*.out
+
+# Generated protobuf
+*.pb.go
+
+# Local configuration and data
+.env
+*.log
+*.sqlite
+models/*.gguf
+models/*.bin
+intel-hive.tar.gz
+
+# OS
+.DS_Store
+Thumbs.db

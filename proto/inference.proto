@@ -1,0 +1,111 @@
+syntax = "proto3";
+
+package intel_hive;
+option go_package = "github.com/akhil92kolli-hub/Intel-Hive/gen/proto";
+
+enum InferencePhase {
+  INFERENCE_PHASE_UNSPECIFIED = 0;
+  INFERENCE_PHASE_PREFILL = 1;
+  INFERENCE_PHASE_DECODE = 2;
+}
+
+// A shard pass. sequence_id identifies worker-local KV state across token
+// positions; only the first shard receives input_token_ids, later shards
+// receive a validated activation envelope.
+message ActivationEnvelope {
+  string job_id = 1;
+  string request_id = 2;
+  string sequence_id = 3;
+  string model_id = 4;
+  string model_version = 5;
+  string source_worker = 6;
+  string destination_worker = 7;
+  uint32 position = 8;
+  uint32 layer = 9;
+  string dtype = 10;
+  repeated int64 shape = 11;
+  bytes payload = 12;
+  string checksum = 13;
+}
+
+message InferenceStep {
+  string job_id = 1;
+  string model_id = 2;
+  string sequence_id = 3;
+  InferencePhase phase = 4;
+  uint32 position = 5;
+  string prompt = 6;
+  repeated uint32 input_token_ids = 7;
+  ActivationEnvelope activation = 8;
+  bool final_shard = 9;
+}
+
+message InferenceStepResult {
+  string job_id = 1;
+  string sequence_id = 2;
+  uint32 position = 3;
+  ActivationEnvelope activation = 4;
+  optional uint32 sampled_token_id = 5;
+  bool end_of_sequence = 6;
+}
+
+message JobAssignment {
+  string job_id = 1;
+  string model_id = 2;
+  string shard_id = 3;
+  uint32 layer_start = 4;
+  uint32 layer_end = 5;
+  string previous_worker = 6;
+  string next_worker = 7;
+  uint32 timeout_ms = 8;
+  InferencePhase phase = 9;
+  string sequence_id = 10;
+  uint32 position = 11;
+  string prompt = 12;
+  repeated uint32 input_token_ids = 13;
+  ActivationEnvelope activation = 14;
+  bool final_shard = 15;
+}
+
+message JobAccepted {
+  string job_id = 1;
+  bool accepted = 2;
+  string reason = 3;
+}
+
+message ActivationPacket {
+  string job_id = 1;
+  uint64 sequence_id = 2;
+  uint32 layer = 3;
+  string dtype = 4;
+  repeated uint32 shape = 5;
+  bytes tensor_data = 6;
+  bytes sha256 = 7;
+}
+
+message JobComplete {
+  string job_id = 1;
+  string worker_id = 2;
+  uint64 sequence_number = 3;
+  uint32 processing_time_ms = 4;
+  string status = 5;
+  string sequence_id = 6;
+  uint32 position = 7;
+  bytes activation = 8;
+  optional uint32 sampled_token_id = 9;
+  bool end_of_sequence = 10;
+  bytes generated_text = 11;
+}
+
+message JobFailed {
+  string job_id = 1;
+  string worker_id = 2;
+  string reason = 3;
+  string error_details = 4;
+}
+
+message SequenceEnd {
+  string job_id = 1;
+  string sequence_id = 2;
+  bool completed = 3;
+}

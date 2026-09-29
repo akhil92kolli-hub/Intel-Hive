@@ -1,0 +1,14 @@
+{
+  "model_id": "mobile-3b",
+  "version": "1.0.0",
+  "format": "gguf",
+  "quantization": "Q4",
+  "architecture": "llama",
+  "layers": 30,
+  "hidden_size": 3072,
+  "shards": [
+    {"id": "mobile-3b-s0", "layer_start": 0, "layer_end": 9},
+    {"id": "mobile-3b-s1", "layer_start": 10, "layer_end": 19},
+    {"id": "mobile-3b-s2", "layer_start": 20, "layer_end": 29}
+  ]
+}
