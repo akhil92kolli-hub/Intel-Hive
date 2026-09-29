@@ -18,8 +18,8 @@ import android.os.IBinder
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import com.intellihive.worker.MainActivity
-import com.intellihive.worker.inference.IntelHiveShardExecutor
-import com.intellihive.worker.inference.UnavailableLlamaCppLayerBackend
+import com.intellihive.worker.inference.NativeTransportShardExecutor
+import com.intellihive.worker.inference.UnavailableNativeShardExecutor
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -49,7 +49,7 @@ class WorkerService : Service() {
     private var heartbeatIntervalSeconds = DEFAULT_HEARTBEAT_SECONDS
     private var registered = false
     private val assignmentExecutor: ShardExecutor =
-        IntelHiveShardExecutor(UnavailableLlamaCppLayerBackend())
+        NativeTransportShardExecutor(UnavailableNativeShardExecutor())
     private val executionMutex = Mutex()
     private val activeAssignments = HashSet<String>()
 

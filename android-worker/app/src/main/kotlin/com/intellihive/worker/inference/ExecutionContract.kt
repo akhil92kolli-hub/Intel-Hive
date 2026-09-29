@@ -56,7 +56,7 @@ data class ShardExecutionRequest(
     val input: ExecutionInput
 )
 
-data class ShardExecutionResult(
+data class NativeShardExecutionResult(
     val requestId: String,
     val sequenceId: String,
     val passOrdinal: Long,
@@ -64,12 +64,13 @@ data class ShardExecutionResult(
     val kvTokenOffsetAfter: Long,
     val outputType: ShardOutputType,
     val payload: ByteArray? = null,
+    val tensorSpec: CanonicalTensorSpec? = null,
     val tokenId: Long? = null
 )
 
 /** Native implementations own only their model shard and local KV cache. */
 interface NativeShardExecutor {
-    suspend fun execute(request: ShardExecutionRequest): ShardExecutionResult
+    suspend fun execute(request: ShardExecutionRequest): NativeShardExecutionResult
     suspend fun endSequence(jobId: String, sequenceId: String, completed: Boolean)
 }
 
@@ -105,11 +106,14 @@ object WorkerAssignmentAdapter {
         )
     }
 
-    fun validateResult(request: ShardExecutionRequest, result: ShardExecutionResult, finalShard: Boolean): String? {
+    fun validateResult(request: ShardExecutionRequest, result: NativeShardExecutionResult, finalShard: Boolean): String? {
         if (result.requestId != request.requestId || result.sequenceId != request.sequenceId || result.passOrdinal != request.passOrdinal) return "execution result identity does not match request"
         if (result.kvTokenOffsetBefore != request.kvTokenOffset || result.kvTokenOffsetAfter != request.kvTokenOffset + request.tokenCount) return "execution result KV token range is not contiguous"
         return if (finalShard) {
             if (result.outputType !in setOf(ShardOutputType.LOGITS, ShardOutputType.TOKEN, ShardOutputType.EOS)) "final shard must return logits, token, or EOS" else null
-        } else if (result.outputType != ShardOutputType.ACTIVATION) "intermediate shard must return activation" else null
+        } else if (result.outputType != ShardOutputType.ACTIVATION) "intermediate shard must return activation"
+        else if (result.payload == null || result.tensorSpec?.validate() != null ||
+            result.tensorSpec.byteLength != result.payload.size.toLong()) "activation result must carry a canonical tensor"
+        else null
     }
 }

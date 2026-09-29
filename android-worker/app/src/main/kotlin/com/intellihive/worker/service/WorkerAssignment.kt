@@ -42,6 +42,7 @@ data class WorkerJobAssignment(
 ) {
     fun validate(): String? {
         if (requestId.isBlank() || modelVersion.isBlank() || workerId.isBlank()) return "request_id, model_version, and worker_id are required"
+		if (!modelArtifactDigest.matches(Regex("sha256:[0-9a-f]{64}"))) return "model_artifact_digest must be a SHA-256 digest"
  if (!finalShard && nextWorker.isNullOrBlank()) return "non-final shard requires next_worker"
  if (assignmentId.isBlank() || jobId.isBlank() || modelId.isBlank() ||
             shardId.isBlank() || sequenceId.isBlank()
@@ -51,7 +52,7 @@ data class WorkerJobAssignment(
         if (layerStart < 0 || layerEnd < layerStart) {
             return "assignment layer range is invalid"
         }
-        if (sequence < 0 || position < 0) return "assignment position is invalid"
+        if (sequence < 0 || position < 0 || passOrdinal < 0 || kvTokenOffset < 0 || tokenCount <= 0) return "assignment execution metadata is invalid"
         if (phase != PREFILL && phase != DECODE) return "unsupported inference phase"
 
         val hasPrompt = !prompt.isNullOrEmpty()
@@ -60,12 +61,13 @@ data class WorkerJobAssignment(
         if (listOf(hasPrompt, hasTokens, hasActivation).count { it } != 1) {
             return "exactly one of prompt, input_token_ids, or activation is required"
         }
-        if (phase == PREFILL && position != 0) return "prefill position must be zero"
-        if (phase == DECODE && position == 0) return "decode position must be greater than zero"
-        if (phase == DECODE && hasPrompt) return "decode steps cannot contain prompt text"
+        if (phase == PREFILL && passOrdinal != 0L) return "prefill pass_ordinal must be zero"
+        if (phase == DECODE && passOrdinal == 0L) return "decode pass_ordinal must be greater than zero"
+        if (hasPrompt) return "native execution requires tokenized input, not prompt text"
         if (phase == DECODE && hasTokens && inputTokenIds?.size != 1) {
             return "decode steps must contain exactly one input token"
         }
+		if (hasTokens && inputTokenIds?.size?.toLong() != tokenCount) return "token_count does not match input_token_ids"
         if (inputTokenIds?.any { it < 0L || it > MAX_TOKEN_ID } == true) {
             return "input_token_ids contains an out-of-range token ID"
         }
@@ -73,6 +75,10 @@ data class WorkerJobAssignment(
         activation?.let {
             it.validate()?.let { error -> return error }
             if (!it.matches(this, output = false)) return "activation does not match assignment"
+			if (it.canonicalSpecOrNull() == null || it.modelArtifactDigest != modelArtifactDigest ||
+				it.passOrdinal != passOrdinal || it.kvTokenOffset != kvTokenOffset || it.tokenCount != tokenCount) {
+				return "activation does not match canonical execution metadata"
+			}
         }
         return null
     }

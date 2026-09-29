@@ -157,7 +157,7 @@ data class Activation(
         shape.isEmpty() || shape.any { it <= 0 } -> "activation shape must contain positive dimensions"
         payload.isEmpty() -> "activation payload cannot be empty"
         payloadSizeError() != null -> payloadSizeError()
-        checksum != checksumFor(payload) -> "activation checksum mismatch"
+        checksum != checksum(payload) -> "activation checksum mismatch"
         else -> null
     }
 
@@ -211,10 +211,10 @@ data class Activation(
             dtype = dtype,
             shape = shape.toList(),
             payload = payload.copyOf(),
-            checksum = checksumFor(payload)
+            checksum = checksum(payload)
         )
 
-        private fun checksumFor(data: ByteArray): String =
+        fun checksum(data: ByteArray): String =
             "sha256:" + MessageDigest.getInstance("SHA-256")
                 .digest(data)
                 .joinToString(separator = "") { byte -> "%02x".format(byte) }
