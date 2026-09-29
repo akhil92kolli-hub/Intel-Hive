@@ -52,7 +52,7 @@ class BenchmarkService : Service() {
 
         val modelPath = "${cacheDir}/models/qwen2.5-3b-instruct-q4_k_m.gguf"
 
-        if (!engine.loadModel(modelPath, gpuLayers = 30)) {
+        if (!engine.loadModel(modelPath, gpuLayers = 36)) {
             throw IllegalStateException("Failed to load model at $modelPath")
         }
 

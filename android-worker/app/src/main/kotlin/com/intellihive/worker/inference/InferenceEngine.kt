@@ -41,7 +41,7 @@ class LlamaCppBenchmarkEngine(private val context: Context) {
         val finalTempC: Float
     )
 
-    suspend fun loadModel(modelPath: String, gpuLayers: Int = 30): Boolean {
+    suspend fun loadModel(modelPath: String, gpuLayers: Int = 36): Boolean {
         return withContext(Dispatchers.Default) {
             try {
                 // Load JNI bridge
@@ -101,8 +101,8 @@ class LlamaCppBenchmarkEngine(private val context: Context) {
                 generationSpeedTokensPerSecond = genSpeed,
                 peakRssMb = (endMem - startMem) / (1024 * 1024),
                 peakGpuMb = getGpuMemoryUsage(),
-                activationSizeBytes = 1572864L,  // 1 * 128 * 3072 * 4 bytes
-                activationShape = listOf(1, 128, 3072),
+                activationSizeBytes = 1048576L,  // 1 * 128 * 2048 * 4 bytes
+                activationShape = listOf(1, 128, 2048),
                 activationDtype = "float32",
                 initialTempC = getDeviceTemperature(),
                 peakTempC = getDeviceTemperature() + 12f,
