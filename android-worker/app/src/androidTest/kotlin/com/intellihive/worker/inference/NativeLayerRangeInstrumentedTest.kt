@@ -14,7 +14,7 @@ import org.junit.runner.RunWith
 @RunWith(AndroidJUnit4::class)
 class NativeLayerRangeInstrumentedTest {
     @Test
-    fun loadsPinnedArm64JniAndLlamaRuntime() {
+    fun loadsPinnedArm64JniBridge() {
         assertTrue(
             "JNI load probe failed: ${NativeRuntime.unavailableReason()}",
             NativeRuntime.isAvailable()

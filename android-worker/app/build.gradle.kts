@@ -33,8 +33,8 @@ android {
         applicationId = "com.intellihive.worker"
         minSdk = 28
         targetSdk = 34
-        versionCode = 3
-        versionName = "0.1.2"
+        versionCode = 4
+        versionName = "0.1.3"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         buildConfigField("String", "MODEL_MANIFEST_URL", "\"$configuredModelManifestUrl\"")
         buildConfigField("String", "SUPABASE_URL", "\"$configuredSupabaseUrl\"")

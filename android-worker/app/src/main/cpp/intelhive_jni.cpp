@@ -130,8 +130,11 @@ float read_f32_le(const uint8_t* data) {
 
 extern "C" JNIEXPORT jboolean JNICALL
 Java_com_intelhive_worker_inference_NativeRuntime_nativeIsAvailable(JNIEnv*, jobject) {
-    llama_backend_init();
-    return llama_print_system_info() != nullptr ? JNI_TRUE : JNI_FALSE;
+    // JNI_OnLoad has already registered every native entry point. Keep this
+    // startup probe side-effect-free: llama_backend_init/system-info probing
+    // can execute device-specific CPU detection and must not run while the UI
+    // is merely checking whether the packaged bridge loaded successfully.
+    return JNI_TRUE;
 }
 
 extern "C" JNIEXPORT jlong JNICALL
