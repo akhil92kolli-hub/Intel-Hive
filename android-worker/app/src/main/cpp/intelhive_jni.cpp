@@ -343,12 +343,50 @@ Java_com_intelhive_worker_inference_NativeBridge_nativeUnloadModel(
     models.erase(model_handle);
 }
 
-extern "C" JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM*, void*) {
+extern "C" JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void*) {
+    JNIEnv* env = nullptr;
+    if (vm->GetEnv(reinterpret_cast<void**>(&env), JNI_VERSION_1_6) != JNI_OK || env == nullptr) {
+        return JNI_ERR;
+    }
+
+    jclass bridge_class = env->FindClass("com/intellihive/worker/inference/NativeBridge");
+    if (bridge_class == nullptr) {
+        return JNI_ERR;
+    }
+
+    const JNINativeMethod methods[] = {
+        {const_cast<char*>("nativeIsAvailable"), const_cast<char*>("()Z"),
+            reinterpret_cast<void*>(Java_com_intelhive_worker_inference_NativeBridge_nativeIsAvailable)},
+        {const_cast<char*>("nativeLoadModel"), const_cast<char*>("(Ljava/lang/String;)J"),
+            reinterpret_cast<void*>(Java_com_intelhive_worker_inference_NativeBridge_nativeLoadModel)},
+        {const_cast<char*>("nativeLayerCount"), const_cast<char*>("(J)I"),
+            reinterpret_cast<void*>(Java_com_intelhive_worker_inference_NativeBridge_nativeLayerCount)},
+        {const_cast<char*>("nativeEmbeddingSize"), const_cast<char*>("(J)I"),
+            reinterpret_cast<void*>(Java_com_intelhive_worker_inference_NativeBridge_nativeEmbeddingSize)},
+        {const_cast<char*>("nativeCreateShard"), const_cast<char*>("(JII)J"),
+            reinterpret_cast<void*>(Java_com_intelhive_worker_inference_NativeBridge_nativeCreateShard)},
+        {const_cast<char*>("nativeExecute"), const_cast<char*>("(JLjava/lang/String;II[J[B)[B"),
+            reinterpret_cast<void*>(Java_com_intelhive_worker_inference_NativeBridge_nativeExecute)},
+        {const_cast<char*>("nativeEndSequence"), const_cast<char*>("(JLjava/lang/String;)V"),
+            reinterpret_cast<void*>(Java_com_intelhive_worker_inference_NativeBridge_nativeEndSequence)},
+        {const_cast<char*>("nativeDestroyShard"), const_cast<char*>("(J)V"),
+            reinterpret_cast<void*>(Java_com_intelhive_worker_inference_NativeBridge_nativeDestroyShard)},
+        {const_cast<char*>("nativeUnloadModel"), const_cast<char*>("(J)V"),
+            reinterpret_cast<void*>(Java_com_intelhive_worker_inference_NativeBridge_nativeUnloadModel)},
+    };
+    if (env->RegisterNatives(
+            bridge_class,
+            methods,
+            static_cast<jint>(sizeof(methods) / sizeof(methods[0]))) != JNI_OK) {
+        env->DeleteLocalRef(bridge_class);
+        return JNI_ERR;
+    }
+    env->DeleteLocalRef(bridge_class);
 #ifdef __ANDROID__
     __android_log_print(
         ANDROID_LOG_INFO,
         "IntelHiveJNI",
-        "IntelHive Java JNI bridge loaded");
+        "IntelHive Java JNI bridge loaded and native methods registered");
 #endif
     return JNI_VERSION_1_6;
 }

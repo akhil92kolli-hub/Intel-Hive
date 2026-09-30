@@ -49,6 +49,14 @@ class MainActivity : AppCompatActivity() {
             if (intent?.action == WorkerService.ACTION_STATUS) {
                 workerStatusText.text = intent.getStringExtra(WorkerService.EXTRA_STATUS)
                     ?: "Worker status unavailable"
+                if (intent.hasExtra(WorkerService.EXTRA_CONNECTED)) {
+                    val connected = intent.getBooleanExtra(WorkerService.EXTRA_CONNECTED, false)
+                    getSharedPreferences("worker_runtime", MODE_PRIVATE)
+                        .edit()
+                        .putBoolean(WorkerService.KEY_CONNECTED, connected)
+                        .putBoolean(WorkerService.KEY_WORKER_REQUESTED, connected)
+                        .apply()
+                }
                 updateWorkerButton()
             }
         }

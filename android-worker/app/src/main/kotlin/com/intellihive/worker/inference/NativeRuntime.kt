@@ -3,6 +3,7 @@ package com.intellihive.worker.inference
 /** Loads the packaged JNI library before a native shard executor is created. */
 object NativeRuntime {
     private val loadError: String? = try {
+        System.loadLibrary("intelhive_jni")
         if (!NativeBridge.nativeIsAvailable()) {
             "IntelHive JNI bridge did not report itself available"
         } else {

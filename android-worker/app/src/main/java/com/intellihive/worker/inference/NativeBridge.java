@@ -2,10 +2,6 @@ package com.intellihive.worker.inference;
 
 /** Stable Java/JNI boundary used by the Kotlin execution layer. */
 public final class NativeBridge {
-    static {
-        System.loadLibrary("intelhive_jni");
-    }
-
     private NativeBridge() {}
 
     public static native boolean nativeIsAvailable();

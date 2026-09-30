@@ -470,7 +470,12 @@ class WorkerService : Service() {
             .putBoolean(KEY_CONNECTED, connected)
             .putBoolean(KEY_WORKER_REQUESTED, connected)
             .apply()
-        sendBroadcast(Intent(ACTION_STATUS).setPackage(packageName).putExtra(EXTRA_STATUS, message))
+        sendBroadcast(
+            Intent(ACTION_STATUS)
+                .setPackage(packageName)
+                .putExtra(EXTRA_STATUS, message)
+                .putExtra(EXTRA_CONNECTED, connected)
+        )
         if (connected) {
             updateNotification(message)
         }
@@ -521,6 +526,7 @@ class WorkerService : Service() {
         const val ACTION_STOP = "com.intellihive.worker.STOP_WORKER"
         const val EXTRA_SERVER_URL = "server_url"
         const val EXTRA_STATUS = "status"
+        const val EXTRA_CONNECTED = "connected"
         private const val TAG = "WorkerService"
         private const val CHANNEL_ID = "worker_runtime"
         private const val NOTIFICATION_ID = 1101
