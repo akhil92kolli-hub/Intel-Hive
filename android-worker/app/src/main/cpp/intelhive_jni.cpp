@@ -129,16 +129,16 @@ float read_f32_le(const uint8_t* data) {
 }
 
 extern "C" JNIEXPORT jboolean JNICALL
-Java_com_intelhive_worker_inference_NativeRuntime_nativeIsAvailable(JNIEnv*, jobject) {
-    // JNI_OnLoad has already registered every native entry point. Keep this
-    // startup probe side-effect-free: llama_backend_init/system-info probing
+Java_com_intelhive_worker_inference_NativeBridge_nativeIsAvailable(JNIEnv*, jobject) {
+    // JNI_OnLoad has already completed. Keep this startup probe
+    // side-effect-free: llama_backend_init/system-info probing
     // can execute device-specific CPU detection and must not run while the UI
     // is merely checking whether the packaged bridge loaded successfully.
     return JNI_TRUE;
 }
 
 extern "C" JNIEXPORT jlong JNICALL
-Java_com_intelhive_worker_inference_NativeLayerRangeBindings_nativeLoadModel(
+Java_com_intelhive_worker_inference_NativeBridge_nativeLoadModel(
         JNIEnv* env, jobject, jstring model_path) {
     try {
         auto model = std::make_shared<intelhive::Qwen2GgufModel>(read_utf(env, model_path, "model path"));
@@ -153,7 +153,7 @@ Java_com_intelhive_worker_inference_NativeLayerRangeBindings_nativeLoadModel(
 }
 
 extern "C" JNIEXPORT jint JNICALL
-Java_com_intelhive_worker_inference_NativeLayerRangeBindings_nativeLayerCount(
+Java_com_intelhive_worker_inference_NativeBridge_nativeLayerCount(
         JNIEnv* env, jobject, jlong model_handle) {
     try {
         return get_model(model_handle)->config().layer_count;
@@ -164,7 +164,7 @@ Java_com_intelhive_worker_inference_NativeLayerRangeBindings_nativeLayerCount(
 }
 
 extern "C" JNIEXPORT jint JNICALL
-Java_com_intelhive_worker_inference_NativeLayerRangeBindings_nativeEmbeddingSize(
+Java_com_intelhive_worker_inference_NativeBridge_nativeEmbeddingSize(
         JNIEnv* env, jobject, jlong model_handle) {
     try {
         return get_model(model_handle)->config().embedding_size;
@@ -175,7 +175,7 @@ Java_com_intelhive_worker_inference_NativeLayerRangeBindings_nativeEmbeddingSize
 }
 
 extern "C" JNIEXPORT jlong JNICALL
-Java_com_intelhive_worker_inference_NativeLayerRangeBindings_nativeCreateShard(
+Java_com_intelhive_worker_inference_NativeBridge_nativeCreateShard(
         JNIEnv* env, jobject, jlong model_handle, jint first_layer, jint last_layer) {
     try {
         auto model = get_model(model_handle);
@@ -197,7 +197,7 @@ Java_com_intelhive_worker_inference_NativeLayerRangeBindings_nativeCreateShard(
 }
 
 extern "C" JNIEXPORT jbyteArray JNICALL
-Java_com_intelhive_worker_inference_NativeLayerRangeBindings_nativeExecute(
+Java_com_intelhive_worker_inference_NativeBridge_nativeExecute(
         JNIEnv* env, jobject, jlong shard_handle, jstring sequence_id,
         jint token_offset, jint token_count, jlongArray token_ids, jbyteArray activation) {
     try {
@@ -317,7 +317,7 @@ Java_com_intelhive_worker_inference_NativeLayerRangeBindings_nativeExecute(
 }
 
 extern "C" JNIEXPORT void JNICALL
-Java_com_intelhive_worker_inference_NativeLayerRangeBindings_nativeEndSequence(
+Java_com_intelhive_worker_inference_NativeBridge_nativeEndSequence(
         JNIEnv* env, jobject, jlong shard_handle, jstring sequence_id) {
     try {
         const std::string sequence = read_utf(env, sequence_id, "sequence ID");
@@ -330,107 +330,25 @@ Java_com_intelhive_worker_inference_NativeLayerRangeBindings_nativeEndSequence(
 }
 
 extern "C" JNIEXPORT void JNICALL
-Java_com_intelhive_worker_inference_NativeLayerRangeBindings_nativeDestroyShard(
+Java_com_intelhive_worker_inference_NativeBridge_nativeDestroyShard(
         JNIEnv*, jobject, jlong shard_handle) {
     std::lock_guard<std::mutex> lock(handles_mutex);
     shards.erase(shard_handle);
 }
 
 extern "C" JNIEXPORT void JNICALL
-Java_com_intelhive_worker_inference_NativeLayerRangeBindings_nativeUnloadModel(
+Java_com_intelhive_worker_inference_NativeBridge_nativeUnloadModel(
         JNIEnv*, jobject, jlong model_handle) {
     std::lock_guard<std::mutex> lock(handles_mutex);
     models.erase(model_handle);
 }
 
-extern "C" JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void*) {
-    JNIEnv* env = nullptr;
-    if (vm->GetEnv(reinterpret_cast<void**>(&env), JNI_VERSION_1_6) != JNI_OK || env == nullptr) {
-        return JNI_ERR;
-    }
-
-    JNINativeMethod runtime_methods[] = {
-        {
-            const_cast<char*>("nativeIsAvailable"),
-            const_cast<char*>("()Z"),
-            reinterpret_cast<void*>(
-                Java_com_intelhive_worker_inference_NativeRuntime_nativeIsAvailable)
-        }
-    };
-    jclass runtime_class = env->FindClass(
-        "com/intellihive/worker/inference/NativeRuntime");
-    if (runtime_class == nullptr ||
-        env->RegisterNatives(runtime_class, runtime_methods, 1) != JNI_OK) {
-        return JNI_ERR;
-    }
-    env->DeleteLocalRef(runtime_class);
-
-    JNINativeMethod shard_methods[] = {
-        {
-            const_cast<char*>("nativeLoadModel"),
-            const_cast<char*>("(Ljava/lang/String;)J"),
-            reinterpret_cast<void*>(
-                Java_com_intelhive_worker_inference_NativeLayerRangeBindings_nativeLoadModel)
-        },
-        {
-            const_cast<char*>("nativeLayerCount"),
-            const_cast<char*>("(J)I"),
-            reinterpret_cast<void*>(
-                Java_com_intelhive_worker_inference_NativeLayerRangeBindings_nativeLayerCount)
-        },
-        {
-            const_cast<char*>("nativeEmbeddingSize"),
-            const_cast<char*>("(J)I"),
-            reinterpret_cast<void*>(
-                Java_com_intelhive_worker_inference_NativeLayerRangeBindings_nativeEmbeddingSize)
-        },
-        {
-            const_cast<char*>("nativeCreateShard"),
-            const_cast<char*>("(JII)J"),
-            reinterpret_cast<void*>(
-                Java_com_intelhive_worker_inference_NativeLayerRangeBindings_nativeCreateShard)
-        },
-        {
-            const_cast<char*>("nativeExecute"),
-            const_cast<char*>("(JLjava/lang/String;II[J[B)[B"),
-            reinterpret_cast<void*>(
-                Java_com_intelhive_worker_inference_NativeLayerRangeBindings_nativeExecute)
-        },
-        {
-            const_cast<char*>("nativeEndSequence"),
-            const_cast<char*>("(JLjava/lang/String;)V"),
-            reinterpret_cast<void*>(
-                Java_com_intelhive_worker_inference_NativeLayerRangeBindings_nativeEndSequence)
-        },
-        {
-            const_cast<char*>("nativeDestroyShard"),
-            const_cast<char*>("(J)V"),
-            reinterpret_cast<void*>(
-                Java_com_intelhive_worker_inference_NativeLayerRangeBindings_nativeDestroyShard)
-        },
-        {
-            const_cast<char*>("nativeUnloadModel"),
-            const_cast<char*>("(J)V"),
-            reinterpret_cast<void*>(
-                Java_com_intelhive_worker_inference_NativeLayerRangeBindings_nativeUnloadModel)
-        }
-    };
-    jclass shard_class = env->FindClass(
-        "com/intelhive/worker/inference/NativeLayerRangeBindings");
-    if (shard_class == nullptr ||
-        env->RegisterNatives(
-            shard_class,
-            shard_methods,
-            sizeof(shard_methods) / sizeof(shard_methods[0])) != JNI_OK) {
-        return JNI_ERR;
-    }
-    env->DeleteLocalRef(shard_class);
-
+extern "C" JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM*, void*) {
 #ifdef __ANDROID__
     __android_log_print(
         ANDROID_LOG_INFO,
         "IntelHiveJNI",
-        "IntelHive shard runtime loaded and native methods registered");
+        "IntelHive Java JNI bridge loaded");
 #endif
     return JNI_VERSION_1_6;
 }

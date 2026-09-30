@@ -12,21 +12,30 @@ import com.intellihive.worker.model.ModelManifest
 import com.intellihive.worker.model.RequiredModelManager
 
 internal class NativeLayerRangeBindings {
-    external fun nativeLoadModel(modelPath: String): Long
-    external fun nativeLayerCount(modelHandle: Long): Int
-    external fun nativeEmbeddingSize(modelHandle: Long): Int
-    external fun nativeCreateShard(modelHandle: Long, firstLayer: Int, lastLayer: Int): Long
-    external fun nativeExecute(
+    fun nativeLoadModel(modelPath: String): Long = NativeBridge.nativeLoadModel(modelPath)
+    fun nativeLayerCount(modelHandle: Long): Int = NativeBridge.nativeLayerCount(modelHandle)
+    fun nativeEmbeddingSize(modelHandle: Long): Int = NativeBridge.nativeEmbeddingSize(modelHandle)
+    fun nativeCreateShard(modelHandle: Long, firstLayer: Int, lastLayer: Int): Long =
+        NativeBridge.nativeCreateShard(modelHandle, firstLayer, lastLayer)
+    fun nativeExecute(
         shardHandle: Long,
         sequenceId: String,
         tokenOffset: Int,
         tokenCount: Int,
         tokenIds: LongArray?,
         activation: ByteArray?
-    ): ByteArray
-    external fun nativeEndSequence(shardHandle: Long, sequenceId: String)
-    external fun nativeDestroyShard(shardHandle: Long)
-    external fun nativeUnloadModel(modelHandle: Long)
+    ): ByteArray = NativeBridge.nativeExecute(
+        shardHandle,
+        sequenceId,
+        tokenOffset,
+        tokenCount,
+        tokenIds,
+        activation
+    )
+    fun nativeEndSequence(shardHandle: Long, sequenceId: String) =
+        NativeBridge.nativeEndSequence(shardHandle, sequenceId)
+    fun nativeDestroyShard(shardHandle: Long) = NativeBridge.nativeDestroyShard(shardHandle)
+    fun nativeUnloadModel(modelHandle: Long) = NativeBridge.nativeUnloadModel(modelHandle)
 }
 
 /**

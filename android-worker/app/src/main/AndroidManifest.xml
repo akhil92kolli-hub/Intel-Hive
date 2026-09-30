@@ -29,8 +29,12 @@
         <service
             android:name=".service.WorkerService"
             android:exported="false"
-            android:foregroundServiceType="dataSync" />
-        <service android:name=".service.BenchmarkService" />
+            android:foregroundServiceType="dataSync"
+            android:process=":worker" />
+        <service
+            android:name=".service.BenchmarkService"
+            android:exported="false"
+            android:process=":benchmark" />
 
     </application>
 

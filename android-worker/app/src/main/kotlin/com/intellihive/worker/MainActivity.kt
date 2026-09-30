@@ -14,7 +14,6 @@ import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
-import com.intellihive.worker.inference.NativeRuntime
 import com.intellihive.worker.model.ModelDownloadState
 import com.intellihive.worker.model.ModelManifest
 import com.intellihive.worker.model.RequiredModelManager
@@ -206,16 +205,13 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun showModelReadyState() {
-        val runtimeReady = NativeRuntime.isAvailable()
-        modelReady = runtimeReady
-        modelStatusText.text = if (runtimeReady) {
-            "Model verified • JNI runtime packaged • Ready to connect"
-        } else {
-            "Model verified, but native engine is unavailable: ${NativeRuntime.unavailableReason()}"
-        }
+        modelReady = true
+        modelStatusText.text =
+            "Model verified • Native engine will initialize when the worker connects"
         modelDownloadButton.text = "Model verified"
         modelDownloadButton.isEnabled = false
-        benchmarkButton.isEnabled = runtimeReady
+        benchmarkButton.text = "Benchmark unavailable in this build"
+        benchmarkButton.isEnabled = false
         modelProgressBar.isIndeterminate = false
         modelProgressBar.progress = 100
         updateWorkerButton()
