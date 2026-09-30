@@ -52,6 +52,7 @@ class WorkerService : Service() {
     private var workerId: String = ""
     private var heartbeatIntervalSeconds = DEFAULT_HEARTBEAT_SECONDS
     private var registered = false
+    private var terminalStatusReported = false
     private val assignmentExecutorLock = Any()
     private var assignmentExecutor: ShardExecutor? = null
     private val executionMutex = Mutex()
@@ -63,6 +64,7 @@ class WorkerService : Service() {
             return START_NOT_STICKY
         }
         if (socket != null || initializationJob?.isActive == true) return START_NOT_STICKY
+        terminalStatusReported = false
 
         val endpoint = intent?.getStringExtra(EXTRA_SERVER_URL)?.trim().orEmpty()
         if (!endpoint.startsWith("ws://") && !endpoint.startsWith("wss://")) {
@@ -136,7 +138,9 @@ class WorkerService : Service() {
             (assignmentExecutor as? AutoCloseable)?.close()
             assignmentExecutor = null
         }
-        if (wasConnected) reportStatus("Worker disconnected", connected = false)
+        if (wasConnected && !terminalStatusReported) {
+            reportStatus("Worker disconnected", connected = false)
+        }
         stopForeground(STOP_FOREGROUND_REMOVE)
         super.onDestroy()
     }
@@ -465,6 +469,7 @@ class WorkerService : Service() {
     }
 
     private fun reportStatus(message: String, connected: Boolean) {
+        terminalStatusReported = !connected
         getSharedPreferences(PREFERENCES, Context.MODE_PRIVATE)
             .edit()
             .putBoolean(KEY_CONNECTED, connected)

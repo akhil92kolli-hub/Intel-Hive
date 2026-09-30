@@ -74,10 +74,10 @@
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:autofillHints="url"
-        android:hint="ws://192.168.1.10:8080/worker"
+        android:hint="ws://192.168.1.5:8080/worker"
         android:inputType="textUri"
         android:singleLine="true"
-        android:text="ws://192.168.1.10:8080/worker" />
+        android:text="ws://192.168.1.5:8080/worker" />
 
     <Button
         android:id="@+id/worker_connection_button"
