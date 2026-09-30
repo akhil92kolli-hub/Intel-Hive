@@ -94,7 +94,7 @@ class RequiredModelManager(
         manifest.validate()?.let { error ->
             throw IllegalArgumentException("Refusing to download invalid model manifest: $error")
         }
-        if (isInstalled(manifest)) return DownloadManager.INVALID_DOWNLOAD_ID
+        if (isInstalled(manifest)) return INVALID_DOWNLOAD_ID
 
         check((modelDirectory.isDirectory || modelDirectory.mkdirs()) && modelDirectory.canWrite()) {
             "App-specific model storage is unavailable or not writable"
@@ -263,7 +263,7 @@ class RequiredModelManager(
         private const val KEY_DOWNLOAD_DIGEST = "download_digest"
         private const val KEY_VERIFIED_DIGEST = "verified_digest"
         private const val KEY_VERIFIED_VERSION = "verified_version"
-        private const val INVALID_DOWNLOAD_ID = -1L
+        const val INVALID_DOWNLOAD_ID = -1L
         private const val MAX_MANIFEST_BYTES = 256 * 1024L
         private const val STORAGE_HEADROOM_BYTES = 256 * 1024 * 1024L
 

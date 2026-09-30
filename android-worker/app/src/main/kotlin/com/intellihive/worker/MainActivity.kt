@@ -237,7 +237,7 @@ class MainActivity : AppCompatActivity() {
 
         try {
             val id = modelManager.enqueueDownload(manifest, wifiOnly = modelWifiOnly.isChecked)
-            if (id == android.app.DownloadManager.INVALID_DOWNLOAD_ID) {
+            if (id == RequiredModelManager.INVALID_DOWNLOAD_ID) {
                 showModelReadyState()
             } else {
                 modelDownloadButton.text = "Cancel download"

@@ -31,7 +31,8 @@ class IntelHiveExecutionWrapperTest {
         assertTrue(decode.activation!!.payload.contentEquals(byteArrayOf(11)))
 
         assertEquals(listOf(0, 1), backend.invocations.map { it.position })
-        assertEquals("hello", backend.invocations[0].prompt)
+        assertNull(backend.invocations[0].prompt)
+        assertEquals(listOf(1L), backend.invocations[0].inputTokenIds)
         assertEquals(listOf(42L), backend.invocations[1].inputTokenIds)
         assertNull(backend.invocations[0].activation)
         assertEquals("sequence-1", backend.invocations[1].sequenceId)
@@ -111,7 +112,9 @@ class IntelHiveExecutionWrapperTest {
         activation: Activation? = null,
         finalShard: Boolean
     ) = WorkerJobAssignment(
-        requestId = "job-1", modelVersion = "v1", workerId = "worker-a", nextWorker = "worker-b",
+        requestId = "job-1", modelVersion = "v1",
+        modelArtifactDigest = "sha256:626b4a6678b86442240e33df819e00132d3ba7dddfe1cdc4fbb18e0a9615c62d",
+        workerId = "worker-a", nextWorker = "worker-b",
         assignmentId = "assignment-$position",
         jobId = "job-1",
         modelId = "qwen2.5-3b-instruct",
@@ -119,8 +122,10 @@ class IntelHiveExecutionWrapperTest {
         phase = phase,
         sequenceId = "sequence-1",
         position = position,
-        prompt = prompt,
-        inputTokenIds = inputTokenIds,
+        passOrdinal = if (phase == WorkerJobAssignment.PREFILL) 0 else position.toLong(),
+        kvTokenOffset = position.toLong(),
+        tokenCount = inputTokenIds?.size?.toLong() ?: 1,
+        inputTokenIds = inputTokenIds ?: if (prompt != null) listOf(1L) else null,
         activation = activation,
         finalShard = finalShard,
         layerStart = 0,
@@ -146,7 +151,8 @@ class IntelHiveExecutionWrapperTest {
                 ShardExecutionResult(activation = Activation.create(
                     invocation.jobId, invocation.requestId, invocation.sequenceId, invocation.modelId,
                     invocation.modelVersion, invocation.workerId, invocation.nextWorker!!,
-                    invocation.layerEnd, "uint8", listOf(1), byteArrayOf(invocation.position.toByte() + 10)
+                    invocation.layerEnd, "uint8", listOf(1),
+                    byteArrayOf((invocation.position + 10).toByte())
                 ).copy(position = invocation.position))
             }
         }

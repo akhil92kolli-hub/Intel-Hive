@@ -31,26 +31,27 @@ class ExecutionContractTest {
             passOrdinal = 1,
             kvTokenOffset = 2,
             tokenCount = 1,
-            activation = Activation(
-                passOrdinal = 1,
-                kvTokenOffset = 2,
-                tokenCount = 1,
+            activation = Activation.create(
                 jobId = "job-1",
                 requestId = "request-1",
                 sequenceId = "sequence-1",
                 modelId = "qwen2.5-3b",
                 modelVersion = "1",
-                modelArtifactDigest = MODEL_DIGEST,
                 sourceWorker = "worker-a",
                 destinationWorker = "worker-b",
                 layer = 11,
                 dtype = "F32",
                 shape = listOf(1, 2),
+                payload = payload
+            ).copy(
+                position = 1,
+                passOrdinal = 1,
+                kvTokenOffset = 2,
+                tokenCount = 1,
+                modelArtifactDigest = MODEL_DIGEST,
                 layout = "ROW_MAJOR_CONTIGUOUS",
                 byteOrder = "LITTLE_ENDIAN",
-                byteLength = payload.size.toLong(),
-                payload = payload,
-                checksum = Activation.checksum(payload)
+                byteLength = payload.size.toLong()
             )
         )
 

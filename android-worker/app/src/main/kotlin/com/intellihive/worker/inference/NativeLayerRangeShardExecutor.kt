@@ -43,7 +43,7 @@ class NativeLayerRangeShardExecutor(
     private val modelHandles = mutableMapOf<ModelKey, LoadedModel>()
     private val shardHandles = mutableMapOf<ShardKey, Long>()
 
-    suspend fun prepareModel() = withContext(Dispatchers.IO) {
+    suspend fun prepareModel(): Unit = withContext(Dispatchers.IO) {
         synchronized(lock) {
             check(NativeRuntime.isAvailable()) {
                 "IntelHive native runtime is unavailable: ${NativeRuntime.unavailableReason()}"
@@ -55,6 +55,7 @@ class NativeLayerRangeShardExecutor(
                     ModelManifest.PINNED_ARTIFACT_DIGEST
                 )
             )
+            Unit
         }
     }
 

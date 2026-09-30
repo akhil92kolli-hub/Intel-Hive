@@ -1,6 +1,7 @@
 # Build artifacts and local state
 .build/
 .gradle/
+.cxx/
 build/
 .devtools/
 .idea/

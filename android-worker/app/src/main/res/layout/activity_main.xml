@@ -48,7 +48,7 @@
 
     <ProgressBar
         android:id="@+id/model_progress_bar"
-        style="?attr/progressBarStyleHorizontal"
+        style="?android:attr/progressBarStyleHorizontal"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:max="100"
@@ -103,7 +103,7 @@
 
     <ProgressBar
         android:id="@+id/progress_bar"
-        style="?attr/progressBarStyleHorizontal"
+        style="?android:attr/progressBarStyleHorizontal"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:layout_marginBottom="16dp" />
@@ -118,7 +118,7 @@
             android:layout_height="wrap_content"
             android:text="Awaiting benchmark results..."
             android:textSize="12sp"
-            android:textMonospace="true" />
+            android:fontFamily="monospace" />
     </ScrollView>
 
 </LinearLayout>

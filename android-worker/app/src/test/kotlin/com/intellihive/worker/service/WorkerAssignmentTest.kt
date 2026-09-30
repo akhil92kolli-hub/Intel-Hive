@@ -10,7 +10,9 @@ class WorkerAssignmentTest {
     fun parsesDecodeAssignmentAndBase64Activation() {
         val json = """
             {
-              "request_id":"job-1", "model_version":"v1", "worker_id":"worker-b", "previous_worker":"worker-a", "next_worker":"worker-c",
+              "request_id":"job-1", "model_version":"v1",
+              "model_artifact_digest":"sha256:626b4a6678b86442240e33df819e00132d3ba7dddfe1cdc4fbb18e0a9615c62d",
+              "worker_id":"worker-b", "previous_worker":"worker-a", "next_worker":"worker-c",
               "assignment_id":"assignment-1",
               "job_id":"job-1",
               "model_id":"qwen2.5-3b-instruct",
@@ -18,6 +20,9 @@ class WorkerAssignmentTest {
               "phase":"DECODE",
               "sequence_id":"job-1:0",
               "position":1,
+              "pass_ordinal":1,
+              "kv_token_offset":1,
+              "token_count":1,
               "activation":${workerProtocolGson.toJson(testActivation())},
               "layer_start":10,
               "layer_end":19,
@@ -29,14 +34,16 @@ class WorkerAssignmentTest {
 
         assertEquals("assignment-1", assignment.assignmentId)
         assertEquals(WorkerJobAssignment.DECODE, assignment.phase)
-        assertEquals(listOf<Byte>(1, 2), assignment.activation?.payload?.toList())
+        assertEquals(listOf<Byte>(1, 2, 0, 0, 0, 0, 0, 0), assignment.activation?.payload?.toList())
         assertNull(assignment.validate())
     }
 
     @Test
     fun validatesExactlyOneInputFormAndDecodeTokenCount() {
         val assignment = WorkerJobAssignment(
-            requestId = "job-1", modelVersion = "v1", workerId = "worker-a", nextWorker = "worker-b",
+            requestId = "job-1", modelVersion = "v1",
+            modelArtifactDigest = "sha256:626b4a6678b86442240e33df819e00132d3ba7dddfe1cdc4fbb18e0a9615c62d",
+            workerId = "worker-a", nextWorker = "worker-b",
             assignmentId = "assignment-1",
             jobId = "job-1",
             modelId = "model",
@@ -44,6 +51,8 @@ class WorkerAssignmentTest {
             phase = WorkerJobAssignment.DECODE,
             sequenceId = "job-1:0",
             position = 1,
+            passOrdinal = 1,
+            tokenCount = 1,
             inputTokenIds = listOf(1, 2),
             layerStart = 0,
             layerEnd = 2,
@@ -53,7 +62,19 @@ class WorkerAssignmentTest {
         assertEquals("decode steps must contain exactly one input token", assignment.validate())
     }
 
-    private fun testActivation() = Activation.create("job-1", "job-1", "job-1:0", "qwen2.5-3b-instruct", "v1", "worker-a", "worker-b", 9, "uint8", listOf(2), byteArrayOf(1, 2)).copy(position = 1)
+    private fun testActivation() = Activation.create(
+        "job-1", "job-1", "job-1:0", "qwen2.5-3b-instruct", "v1",
+        "worker-a", "worker-b", 9, "F32", listOf(1, 2), byteArrayOf(1, 2, 0, 0, 0, 0, 0, 0)
+    ).copy(
+        position = 1,
+        passOrdinal = 1,
+        kvTokenOffset = 1,
+        tokenCount = 1,
+        modelArtifactDigest = "sha256:626b4a6678b86442240e33df819e00132d3ba7dddfe1cdc4fbb18e0a9615c62d",
+        layout = "ROW_MAJOR_CONTIGUOUS",
+        byteOrder = "LITTLE_ENDIAN",
+        byteLength = 8
+    )
 
     @Test
     fun serializesCompletionWithWorkerProtocolFieldNames() {
@@ -71,6 +92,6 @@ class WorkerAssignmentTest {
         assertEquals("assignment-1", json.get("assignment_id").asString)
         assertEquals("job-1:0", json.get("sequence_id").asString)
         assertEquals(1, json.get("position").asInt)
-        assertEquals("AQI=", json.getAsJsonObject("activation").get("payload").asString)
+        assertEquals("AQIAAAAAAAA=", json.getAsJsonObject("activation").get("payload").asString)
     }
 }
