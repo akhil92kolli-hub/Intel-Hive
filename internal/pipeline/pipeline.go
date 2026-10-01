@@ -25,10 +25,11 @@ type DistributedJob struct {
 
 // ShardAssignment maps a layer range to a specific worker.
 type ShardAssignment struct {
-	ModelVersion string
-	ShardID      string
-	Layer        model.LayerRange
-	WorkerID     string
+	ModelVersion        string
+	ModelArtifactDigest string
+	ShardID             string
+	Layer               model.LayerRange
+	WorkerID            string
 }
 
 // ShardMetric tracks execution metrics for a single shard.
@@ -157,6 +158,8 @@ func (e *PipelineExecutor) ExecuteInferenceStep(
 	ctx context.Context,
 	jobID, modelID, sequenceID, phase string,
 	position uint32,
+	kvTokenOffset uint32,
+	tokenCount uint32,
 	prompt string,
 	inputTokenIDs []uint32,
 	assignments []ShardAssignment,
@@ -196,12 +199,14 @@ func (e *PipelineExecutor) ExecuteInferenceStep(
 	}
 
 	var previous *activation.Envelope
+	resolvedTokenCount := tokenCount
 	for index, assignment := range ordered {
 		runtime := e.Workers[assignment.WorkerID]
 		input := worker.Job{
-			ID: jobID, RequestID: jobID, ModelVersion: assignment.ModelVersion, WorkerID: assignment.WorkerID, ModelID: modelID, ShardID: assignment.ShardID,
+			ID: jobID, RequestID: jobID, ModelVersion: assignment.ModelVersion, ModelArtifactDigest: assignment.ModelArtifactDigest, WorkerID: assignment.WorkerID, ModelID: modelID, ShardID: assignment.ShardID,
 			Layers: assignment.Layer, Phase: phase, SequenceID: sequenceID,
-			Position: position, FinalShard: index == len(ordered)-1,
+			Position: position, PassOrdinal: uint64(position), KVTokenOffset: kvTokenOffset,
+			TokenCount: resolvedTokenCount, FinalShard: index == len(ordered)-1,
 			Sequence: uint64(position),
 		}
 		if index > 0 {
@@ -228,6 +233,19 @@ func (e *PipelineExecutor) ExecuteInferenceStep(
 		}
 		if result.JobID != "" && result.JobID != jobID {
 			return worker.JobResult{}, fmt.Errorf("worker %s returned a result for job %s, expected %s", assignment.WorkerID, result.JobID, jobID)
+		}
+		if result.PassOrdinal != uint64(position) || result.KVTokenOffsetBefore != kvTokenOffset ||
+			result.KVTokenOffsetAfter <= result.KVTokenOffsetBefore {
+			return worker.JobResult{}, fmt.Errorf("worker %s returned invalid execution metadata", assignment.WorkerID)
+		}
+		actualTokenCount := result.KVTokenOffsetAfter - result.KVTokenOffsetBefore
+		if resolvedTokenCount == 0 {
+			if index != 0 || prompt == "" {
+				return worker.JobResult{}, fmt.Errorf("worker %s returned an unexpected token count", assignment.WorkerID)
+			}
+			resolvedTokenCount = actualTokenCount
+		} else if actualTokenCount != resolvedTokenCount {
+			return worker.JobResult{}, fmt.Errorf("worker %s returned a non-contiguous KV token range", assignment.WorkerID)
 		}
 		if index < len(ordered)-1 {
 			if result.Activation == nil || result.SampledTokenID != nil || result.EndOfSequence {

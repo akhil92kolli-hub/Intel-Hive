@@ -74,6 +74,10 @@ interface NativeShardExecutor {
     suspend fun endSequence(jobId: String, sequenceId: String, completed: Boolean)
 }
 
+interface NativePromptTokenizer {
+    suspend fun tokenize(prompt: String): List<Long>
+}
+
 object WorkerAssignmentAdapter {
     fun toExecutionRequest(assignment: WorkerJobAssignment): ShardExecutionRequest {
         require(assignment.modelArtifactDigest.matches(Regex("sha256:[0-9a-f]{64}"))) { "model_artifact_digest must be a SHA-256 digest" }

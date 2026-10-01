@@ -153,8 +153,8 @@ func (h *WorkerSocketHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) 
 					ID: workerID, State: schedulerState(capabilities.State),
 					Platform: scheduler.WorkerPlatform(request.Platform),
 					Layers:   capabilities.Layers, Benchmarks: capabilities.Benchmarks,
-					MemoryMB:    capabilities.MemoryMB,
-					ModelShards: make(map[string]map[string]model.LayerRange),
+					MemoryMB:             capabilities.MemoryMB,
+					ModelShards:          make(map[string]map[string]model.LayerRange),
 					ModelArtifactDigests: make(map[string]map[string]string),
 				}
 				for _, shard := range request.LoadedShards {
@@ -310,6 +310,7 @@ func (h *WorkerSocketHandler) validateShardCatalog(request protocol.WorkerRegist
 	defer h.mu.RUnlock()
 	incoming := make(map[string]model.LayerRange)
 	versions := make(map[string]string)
+	digests := make(map[string]string)
 	for _, shard := range request.LoadedShards {
 		if strings.TrimSpace(shard.ModelVersion) == "" {
 			return fmt.Errorf("loaded shard model_version is required")
@@ -318,9 +319,16 @@ func (h *WorkerSocketHandler) validateShardCatalog(request protocol.WorkerRegist
 			return fmt.Errorf("conflicting model versions")
 		}
 		versions[shard.ModelID] = shard.ModelVersion
+		if digest, ok := digests[shard.ModelID]; ok && digest != shard.ModelArtifactDigest {
+			return fmt.Errorf("conflicting model artifact digests")
+		}
+		digests[shard.ModelID] = shard.ModelArtifactDigest
 		for _, known := range h.models[shard.ModelID] {
 			if known.Version != shard.ModelVersion {
 				return fmt.Errorf("model version conflicts with registered catalog")
+			}
+			if known.ArtifactDigest != shard.ModelArtifactDigest {
+				return fmt.Errorf("model artifact digest conflicts with registered catalog")
 			}
 		}
 		rangeForShard := model.LayerRange{Start: shard.LayerStart, End: shard.LayerEnd}
@@ -330,7 +338,8 @@ func (h *WorkerSocketHandler) validateShardCatalog(request protocol.WorkerRegist
 		}
 		incoming[key] = rangeForShard
 		if registered, exists := h.models[shard.ModelID][shard.ShardID]; exists &&
-			(registered.Layers != rangeForShard || registered.Version != shard.ModelVersion) {
+			(registered.Layers != rangeForShard || registered.Version != shard.ModelVersion ||
+				registered.ArtifactDigest != shard.ModelArtifactDigest) {
 			return fmt.Errorf("shard %s conflicts with its registered layer range", shard.ShardID)
 		}
 	}
@@ -350,8 +359,21 @@ func validateRegistration(request protocol.WorkerRegisterRequest) error {
 	if request.Power.BatteryPercent > 100 {
 		return fmt.Errorf("battery_percent must be between 0 and 100")
 	}
+	if strings.EqualFold(request.Inference.BenchmarkStatus, "COMPLETED") {
+		if request.Inference.Performance == nil || request.Inference.Performance.TokensPerSecond <= 0 {
+			return fmt.Errorf("completed benchmark requires positive performance")
+		}
+		switch request.Inference.Performance.ExecutionMode {
+		case protocol.BenchmarkExecutionModeSingleDeviceAllShards,
+			protocol.BenchmarkExecutionModeDistributedPipeline:
+		default:
+			return fmt.Errorf("completed benchmark requires a supported execution_mode")
+		}
+	}
 	for _, shard := range request.LoadedShards {
-		if shard.ModelID == "" || shard.ShardID == "" || shard.LayerStart < 0 || shard.LayerEnd < shard.LayerStart {
+		if shard.ModelID == "" || shard.ShardID == "" ||
+			!protocol.ValidSHA256Digest(shard.ModelArtifactDigest) ||
+			shard.LayerStart < 0 || shard.LayerEnd < shard.LayerStart {
 			return fmt.Errorf("loaded_shards contains an invalid shard")
 		}
 	}
@@ -404,6 +426,7 @@ func workerFromRequest(request protocol.WorkerRegisterRequest) *registry.Worker 
 	if request.Inference.Performance != nil {
 		worker.Inference.Performance = &registry.BenchmarkInfo{
 			Status: benchmarkStatus, TokensPerSecond: request.Inference.Performance.TokensPerSecond,
+			ExecutionMode: request.Inference.Performance.ExecutionMode,
 		}
 	}
 	return worker

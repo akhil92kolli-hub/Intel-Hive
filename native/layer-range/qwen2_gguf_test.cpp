@@ -147,6 +147,11 @@ int main(int argc, char** argv) {
                 config.feed_forward_size == 11008 && config.attention_heads == 16 &&
                 config.kv_heads == 2,
                 "GGUF metadata does not match Qwen2.5-3B-Instruct");
+        const auto prompt_tokens = model->tokenize("Hello from IntelHive");
+        require(!prompt_tokens.empty() &&
+                std::all_of(prompt_tokens.begin(), prompt_tokens.end(), [&](int32_t token) {
+                    return token >= 0 && token < config.vocabulary_size;
+                }), "GGUF tokenizer produced invalid token IDs");
 
         const std::vector<uint32_t> token_ids{17, 42, 1337, 314, 2718, 5};
         const auto reference = llama_reference_logits(argv[1], token_ids, 3);

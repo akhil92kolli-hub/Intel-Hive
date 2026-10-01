@@ -238,6 +238,20 @@ func TestGenerateRunsPrefillAndDecodeAcrossAllShardsUntilEOS(t *testing.T) {
 		} else if job.Activation == nil {
 			t.Fatalf("downstream shard did not receive activation: %+v", job)
 		}
+		wantOffset := uint32(2 + max(0, pass-1))
+		wantCount := uint32(1)
+		if pass == 0 {
+			wantOffset = 0
+			if i%3 == 0 {
+				wantCount = 0
+			} else {
+				wantCount = 2
+			}
+		}
+		if job.KVTokenOffset != wantOffset || job.TokenCount != wantCount ||
+			job.PassOrdinal != uint64(pass) {
+			t.Fatalf("unexpected execution metadata at index %d: %+v", i, job)
+		}
 	}
 }
 
@@ -274,21 +288,32 @@ type tokenLoopWorker struct {
 
 func (w *tokenLoopWorker) Execute(_ context.Context, job worker.Job) (worker.JobResult, error) {
 	*w.calls = append(*w.calls, job)
+	tokenCount := job.TokenCount
+	if tokenCount == 0 && job.Prompt != "" {
+		tokenCount = 2
+	}
+	metadata := worker.JobResult{
+		JobID: job.ID, PassOrdinal: job.PassOrdinal,
+		KVTokenOffsetBefore: job.KVTokenOffset,
+		KVTokenOffsetAfter:  job.KVTokenOffset + tokenCount,
+	}
 	if !job.FinalShard {
 		a := activation.NewEnvelope(job.ID, job.RequestID, job.SequenceID, job.ModelID, job.ModelVersion, job.WorkerID, job.NextWorker, job.Layers.End, "uint8", []int64{1}, []byte{1})
 		a.Position = job.Position
-		return worker.JobResult{
-			JobID: job.ID, Activation: &a,
-		}, nil
+		a.PassOrdinal = job.PassOrdinal
+		a.KVTokenOffset = job.KVTokenOffset
+		a.TokenCount = tokenCount
+		metadata.Activation = &a
+		return metadata, nil
 	}
 	if job.Position >= 2 {
-		return worker.JobResult{JobID: job.ID, EndOfSequence: true}, nil
+		metadata.EndOfSequence = true
+		return metadata, nil
 	}
 	token := uint32(100 + job.Position)
-	return worker.JobResult{
-		JobID: job.ID, SampledTokenID: &token,
-		GeneratedText: []byte{byte('A' + job.Position)},
-	}, nil
+	metadata.SampledTokenID = &token
+	metadata.GeneratedText = []byte{byte('A' + job.Position)}
+	return metadata, nil
 }
 
 func newTokenLoopScheduler() (*Scheduler, *[]worker.Job) {

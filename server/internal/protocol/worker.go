@@ -7,6 +7,11 @@ import (
 
 const ProtocolVersion = "phase-0-v3"
 
+const (
+	BenchmarkExecutionModeSingleDeviceAllShards = "single_device_all_shards"
+	BenchmarkExecutionModeDistributedPipeline   = "distributed_pipeline"
+)
+
 // WorkerRegisterRequest is sent by a worker to the server.
 type WorkerRegisterRequest struct {
 	ProtocolVersion string `json:"protocol_version"`
@@ -62,6 +67,7 @@ type InferenceInfo struct {
 
 type PerformanceInfo struct {
 	TokensPerSecond float64 `json:"tokens_per_second"`
+	ExecutionMode   string  `json:"execution_mode,omitempty"`
 }
 
 type NetworkInfo struct {

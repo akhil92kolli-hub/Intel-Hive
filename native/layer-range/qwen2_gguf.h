@@ -53,6 +53,7 @@ public:
     Qwen2GgufModel& operator=(const Qwen2GgufModel&) = delete;
 
     const Qwen2Config& config() const;
+    std::vector<int32_t> tokenize(const std::string& text) const;
     std::vector<float> embed_token(uint32_t token_id) const;
     std::vector<float> project_logits(const std::vector<float>& hidden_state) const;
     const std::string& path() const;

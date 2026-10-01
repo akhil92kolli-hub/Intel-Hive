@@ -5,8 +5,42 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import kotlinx.coroutines.runBlocking
 
 class ExecutionContractTest {
+    @Test
+    fun transportAdapterTokenizesPromptBeforeNativeExecution() = runBlocking {
+        val native = RecordingPromptExecutor()
+        val adapter = NativeTransportShardExecutor(native)
+        val assignment = WorkerJobAssignment(
+            requestId = "request-1",
+            modelVersion = "1",
+            modelArtifactDigest = MODEL_DIGEST,
+            workerId = "worker-a",
+            assignmentId = "assignment-1",
+            jobId = "job-1",
+            modelId = "qwen2.5-3b",
+            shardId = "layers-0",
+            phase = WorkerJobAssignment.PREFILL,
+            sequenceId = "sequence-1",
+            passOrdinal = 0,
+            kvTokenOffset = 0,
+            tokenCount = 0,
+            prompt = "hello",
+            finalShard = true,
+            layerStart = 0,
+            layerEnd = 35
+        )
+
+        val result = adapter.execute(assignment)
+
+        assertEquals("hello", native.prompt)
+        assertEquals(listOf(17L, 42L), (native.request!!.input as ExecutionInput.TokenIDs).values)
+        assertEquals(2L, native.request!!.tokenCount)
+        assertEquals(2L, result.kvTokenOffsetAfter)
+        assertEquals(7L, result.sampledTokenId)
+    }
+
     @Test
     fun mapsTokenPrefillAssignmentToNativeRequest() {
         val request = WorkerAssignmentAdapter.toExecutionRequest(assignment(
@@ -119,5 +153,30 @@ class ExecutionContractTest {
     companion object {
         private const val MODEL_DIGEST =
             "sha256:626b4a6678b86442240e33df819e00132d3ba7dddfe1cdc4fbb18e0a9615c62d"
+    }
+
+    private class RecordingPromptExecutor : NativeShardExecutor, NativePromptTokenizer {
+        var prompt: String? = null
+        var request: ShardExecutionRequest? = null
+
+        override suspend fun tokenize(prompt: String): List<Long> {
+            this.prompt = prompt
+            return listOf(17L, 42L)
+        }
+
+        override suspend fun execute(request: ShardExecutionRequest): NativeShardExecutionResult {
+            this.request = request
+            return NativeShardExecutionResult(
+                requestId = request.requestId,
+                sequenceId = request.sequenceId,
+                passOrdinal = request.passOrdinal,
+                kvTokenOffsetBefore = request.kvTokenOffset,
+                kvTokenOffsetAfter = request.kvTokenOffset + request.tokenCount,
+                outputType = ShardOutputType.TOKEN,
+                tokenId = 7L
+            )
+        }
+
+        override suspend fun endSequence(jobId: String, sequenceId: String, completed: Boolean) = Unit
     }
 }

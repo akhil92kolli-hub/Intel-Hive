@@ -15,9 +15,8 @@ server-negotiated heartbeat interval, and reports capability/power information.
 The Go gateway dispatches scheduler assignments to WebSocket workers and
 routes results back to the waiting `POST /inference` request. `/inference`
 performs a prefill pass across every assigned shard followed by autoregressive
-decode passes until EOS or `max_tokens` (default 32, maximum 256). The Android
-and iOS clients currently implement registration and heartbeats only; native
-job execution remains unimplemented.
+decode passes until EOS or `max_tokens` (default 32, maximum 256). The Android client executes assignments with the native Qwen layer-range
+backend. The iOS client currently implements registration and heartbeats only.
 
 This LAN development endpoint has no worker authentication and must not be
 exposed to the public Internet. TLS, authentication, and remote-worker
@@ -46,12 +45,15 @@ remain simple until transport measurements justify compression or quantization.
 
 `InferenceStep` and its WebSocket `job_assignment` fields define the
 token-loop contract. Each shard pass has a stable `sequence_id` for worker-local
-KV-cache state, a phase (`PREFILL` or `DECODE`), and an increasing pass
-`position` (prefill is zero). Workers track the actual model token offset after
-tokenizing the prompt. Exactly one input form is
-present: token IDs at the first shard or a serialized activation envelope at
-later shards. During prefill, the prompt token IDs are processed at position zero.
-During decode, one sampled token is processed at each increasing position.
+KV-cache state, a phase (`PREFILL` or `DECODE`), an execution
+`pass_ordinal`, an explicit `kv_token_offset`, and `token_count`. A pass ordinal
+is never used as a KV position. Exactly one input form is present: prompt text
+or token IDs at the first shard, or a serialized activation envelope at later
+shards. The Android transport adapter tokenizes prompt text with the loaded,
+digest-verified GGUF before constructing the backend execution request; the
+resolved token count is returned to the scheduler and propagated downstream. Prefill
+may process many contiguous tokens; decode currently processes one token per
+pass.
 
 Every non-final shard returns an activation for the next shard. The final shard
 returns either one sampled token ID or an end-of-sequence signal and may return
@@ -60,5 +62,5 @@ pass with that token until EOS or the requested token limit. The scheduler sends
 when abandoning a failed attempt. Workers must discard sequence-local KV state
 when receiving that message. Result job, sequence, and position values must
 match the corresponding step.
-The server dispatches this loop now; mobile clients must implement these
-assignment/result fields before they can execute inference.
+The server and Android worker implement this loop. The remaining Android M1
+gate is real activation transport across independently connected devices.

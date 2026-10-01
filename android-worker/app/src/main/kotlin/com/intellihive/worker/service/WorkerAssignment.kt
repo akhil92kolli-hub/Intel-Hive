@@ -52,7 +52,7 @@ data class WorkerJobAssignment(
         if (layerStart < 0 || layerEnd < layerStart) {
             return "assignment layer range is invalid"
         }
-        if (sequence < 0 || position < 0 || passOrdinal < 0 || kvTokenOffset < 0 || tokenCount <= 0) return "assignment execution metadata is invalid"
+        if (sequence < 0 || position < 0 || passOrdinal < 0 || kvTokenOffset < 0 || tokenCount < 0) return "assignment execution metadata is invalid"
         if (phase != PREFILL && phase != DECODE) return "unsupported inference phase"
 
         val hasPrompt = !prompt.isNullOrEmpty()
@@ -63,7 +63,11 @@ data class WorkerJobAssignment(
         }
         if (phase == PREFILL && passOrdinal != 0L) return "prefill pass_ordinal must be zero"
         if (phase == DECODE && passOrdinal == 0L) return "decode pass_ordinal must be greater than zero"
-        if (hasPrompt) return "native execution requires tokenized input, not prompt text"
+        if (hasPrompt && (phase != PREFILL || layerStart != 0 || passOrdinal != 0L ||
+                kvTokenOffset != 0L || tokenCount != 0L)) {
+            return "prompt prefill must start at layer zero with an unresolved token count"
+        }
+        if (!hasPrompt && tokenCount == 0L) return "token_count must be positive"
         if (phase == DECODE && hasTokens && inputTokenIds?.size != 1) {
             return "decode steps must contain exactly one input token"
         }
@@ -103,6 +107,9 @@ data class WorkerJobComplete(
     val status: String = "completed",
     @SerializedName("sequence_id") val sequenceId: String,
     val position: Int,
+    @SerializedName("pass_ordinal") val passOrdinal: Long = 0,
+    @SerializedName("kv_token_offset_before") val kvTokenOffsetBefore: Long = 0,
+    @SerializedName("kv_token_offset_after") val kvTokenOffsetAfter: Long = 0,
     val activation: Activation? = null,
     @SerializedName("sampled_token_id") val sampledTokenId: Long? = null,
     @SerializedName("end_of_sequence") val endOfSequence: Boolean = false,
@@ -125,6 +132,9 @@ data class WorkerSequenceEnd(
 )
 
 data class ShardExecutionResult(
+    val passOrdinal: Long = 0,
+    val kvTokenOffsetBefore: Long = 0,
+    val kvTokenOffsetAfter: Long = 0,
     val activation: Activation? = null,
     val sampledTokenId: Long? = null,
     val endOfSequence: Boolean = false,

@@ -8,11 +8,11 @@ The current Phase-0 implementation provides:
 - an Android foreground service that registers a device and reports liveness/power state
 - a Go scheduler and pipeline executor with mock and remote-worker runtimes
 
-The server-side remote execution protocol is wired. The Android worker consumes
-assignments but has no native layer-range executor; iOS assignment execution
-also remains incomplete. The Android full-model benchmark class has JNI
-declarations, but a working native llama.cpp bridge and real shard execution
-are not present in this repository.
+The server-side remote execution protocol is wired. The Android worker now
+executes real Qwen2.5-3B GGUF layer ranges through JNI, including prefill,
+decode, and worker-local KV positions. iOS assignment execution remains
+incomplete. Android benchmark results use the production shard executor and
+persist an explicit execution mode.
 
 ## Current worker flow
 
@@ -24,12 +24,16 @@ Workers remain `UNBENCHMARKED` until benchmark results and model/shard
 capabilities are provided. Ready workers with registered model shards are
 available to the Go scheduler. `POST /inference` builds a deterministic
 pipeline from registered shard ranges, runs a prefill pass followed by
-token-by-token decode passes, and returns generated text and token IDs.
+token-by-token decode passes, and returns generated text, token IDs,
+`execution_mode`, and the participating `worker_ids`.
 Assignments include independent pass-ordinal and KV-token-offset metadata for
 worker-local KV state. A pass ordinal is never used as an inference position.
-Phase 0 currently recognizes the Qwen2.5-3B model identifiers and their known
-layer counts. The loop is wired through the server protocol and scheduler, but
-mobile runtimes do not yet execute real model inference assignments.
+For prompt prefill, the first Android worker tokenizes UTF-8 text with the
+verified GGUF vocabulary and reports the resolved token count. The scheduler
+uses that count as the decode KV offset and propagates it to later shards.
+Phase 0 recognizes the pinned 36-layer Qwen2.5-3B model artifact. The Android
+runtime executes these assignments; independent-device activation transport
+still requires the two-phone and three-phone validation runs.
 
 The activation value contract is defined in Go as `activation.Envelope` and
 mirrored at the Android transport boundary. It carries the request/sequence,
@@ -46,39 +50,18 @@ misrouted, or mismatched-model tensors before they reach the native backend.
 
 ## Remaining M1 integration
 
-1. Implement assignment execution in the iOS worker runtime.
-2. Integrate a real GGUF/Qwen model loader with Android's native layer-range
-   runtime; the current T002C prototype uses synthetic test weights.
-3. Wire the typed Android `InferenceEngine`, `ModelSpec`, `ShardSpec`, and
-   activation/state contract to that model-backed executor.
-4. Verify the native execution path on two and then three physical Android phones.
+1. Run the scheduler with two independently connected Android workers and prove
+   that canonical activations cross the network between shard owners.
+2. Repeat with three workers assigned `0-9`, `10-19`, and `20-35`.
+3. Record distributed results with
+   `execution_mode=distributed_pipeline`; the current Android device benchmark
+   is `single_device_all_shards` and does not prove network transport.
+4. Implement assignment execution in the iOS worker runtime separately.
 
-The Android service now parses and validates `job_assignment`, acknowledges
-valid assignments, reports correlated completion/failure messages, and handles
-`sequence_end`. Its current executor explicitly rejects work because no native
-layer-range backend is present; this protocol integration alone does not make
-the Android device inference-ready.
-
-The Android inference package now defines an IntelHive-owned `InferenceEngine`
-contract and typed model/shard/activation structures. Activations identify the
-job, request, sequence, model version, source/destination workers, pass
-position, output layer, tensor dtype/shape, and SHA-256 checksum. The
-`LlamaCppBenchmarkEngine` remains a single-device full-model benchmark and
-does not implement `InferenceEngine`. The native T002C prototype is kept under
-`native/layer-range`; it uses ggml to prove that a residual stream can be
-executed across independently stateful inclusive layer ranges, including
-prefill, decode positions, KV reset, and malformed input handling. It uses
-deterministic test weights and is not an Android Qwen executor. The checked-in
-source is an extracted tree, so `upstream.lock` intentionally blocks the build
-until it is replaced with the exact 40-character revision of a llama.cpp Git
-checkout. Then build and run the feasibility test with that checkout:
-
-```sh
-cmake -S native/layer-range -B build/layer-range \
-  -DLLAMA_SOURCE_DIR=/path/to/pinned/llama.cpp -DCMAKE_BUILD_TYPE=Release
-cmake --build build/layer-range --parallel
-ctest --test-dir build/layer-range --output-on-failure
-```
+The Android backend is currently multithreaded CPU. Vulkan requires backend
+buffer allocation and scheduling in the IntelHive layer-range executor; merely
+enabling llama.cpp's Vulkan build option does not move its custom graphs or
+mmap-backed tensors to the GPU. See `docs/android-native-backends.md`.
 
 ## Relevant implementation files
 
@@ -91,7 +74,7 @@ ctest --test-dir build/layer-range --output-on-failure
 - `internal/activation/contract.go`
 - `android-worker/app/src/main/kotlin/com/intellihive/worker/service/WorkerService.kt`
 - `android-worker/app/src/main/kotlin/com/intellihive/worker/inference/ShardInference.kt`
-- `android-worker/app/src/main/kotlin/com/intellihive/worker/inference/InferenceEngine.kt`
+- `android-worker/app/src/main/kotlin/com/intellihive/worker/inference/NativeShardBenchmarkEngine.kt`
 
 ## Model target
 

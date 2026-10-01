@@ -35,7 +35,8 @@ func TestWorkerSocketRegistersAndAcceptsHeartbeats(t *testing.T) {
 		Inference:       protocol.InferenceInfo{Runtime: "llama.cpp", Backend: "cpu", BenchmarkStatus: "NOT_RUN"},
 		Power:           protocol.PowerInfo{BatteryPercent: 75, Charging: true},
 		LoadedShards: []protocol.LoadedShardInfo{{ModelVersion: "v1",
-			ModelID: "qwen-3b", ShardID: "shard-0-9", LayerStart: 0, LayerEnd: 9,
+			ModelID: "qwen-3b", ModelArtifactDigest: testModelDigest,
+			ShardID: "shard-0-9", LayerStart: 0, LayerEnd: 9,
 		}},
 	}
 	writeWorkerMessage(t, conn, "register", registration)
@@ -112,6 +113,57 @@ func TestWorkerSocketRejectsUnsupportedProtocol(t *testing.T) {
 	}
 	if reply.Type != "register_ack" || reply.Payload.Accepted || reply.Payload.Reason == "" {
 		t.Fatalf("expected rejected registration, got %+v", reply)
+	}
+}
+
+func TestWorkerFromRequestPreservesBenchmarkExecutionMode(t *testing.T) {
+	request := protocol.WorkerRegisterRequest{
+		WorkerID: "benchmarked-worker",
+		Platform: "android",
+		Inference: protocol.InferenceInfo{
+			Runtime: "llama.cpp", Backend: "cpu", BenchmarkStatus: "COMPLETED",
+			Performance: &protocol.PerformanceInfo{
+				TokensPerSecond: 0.07,
+				ExecutionMode:   protocol.BenchmarkExecutionModeSingleDeviceAllShards,
+			},
+		},
+	}
+
+	registered := workerFromRequest(request)
+
+	if registered.Inference.Performance == nil ||
+		registered.Inference.Performance.ExecutionMode != protocol.BenchmarkExecutionModeSingleDeviceAllShards {
+		t.Fatalf("benchmark execution mode was not preserved: %+v", registered.Inference.Performance)
+	}
+}
+
+func TestRegistrationRejectsCompletedBenchmarkWithoutExecutionMode(t *testing.T) {
+	request := protocol.WorkerRegisterRequest{
+		ProtocolVersion: protocol.ProtocolVersion,
+		WorkerID:        "benchmarked-worker",
+		Platform:        "android",
+		Inference: protocol.InferenceInfo{
+			BenchmarkStatus: "COMPLETED",
+			Performance:     &protocol.PerformanceInfo{TokensPerSecond: 1},
+		},
+	}
+
+	if err := validateRegistration(request); err == nil {
+		t.Fatal("expected completed benchmark without execution_mode to be rejected")
+	}
+}
+
+func TestRegistrationRejectsShardWithoutArtifactDigest(t *testing.T) {
+	request := protocol.WorkerRegisterRequest{
+		ProtocolVersion: protocol.ProtocolVersion,
+		WorkerID:        "worker",
+		Platform:        "android",
+		LoadedShards: []protocol.LoadedShardInfo{{
+			ModelVersion: "1", ModelID: "model", ShardID: "s0", LayerStart: 0, LayerEnd: 9,
+		}},
+	}
+	if err := validateRegistration(request); err == nil {
+		t.Fatal("expected loaded shard without artifact digest to be rejected")
 	}
 }
 

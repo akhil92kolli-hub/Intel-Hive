@@ -29,12 +29,14 @@ android {
     compileSdk = 34
     ndkVersion = "26.3.11579264"
 
+    sourceSets["main"].java.srcDir("src/main/kotlin")
+
     defaultConfig {
         applicationId = "com.intellihive.worker"
         minSdk = 28
         targetSdk = 34
-        versionCode = 7
-        versionName = "0.1.6"
+        versionCode = 8
+        versionName = "0.1.7"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         buildConfigField("String", "MODEL_MANIFEST_URL", "\"$configuredModelManifestUrl\"")
         buildConfigField("String", "SUPABASE_URL", "\"$configuredSupabaseUrl\"")

@@ -8,6 +8,7 @@ public final class NativeBridge {
     public static native long nativeLoadModel(String modelPath);
     public static native int nativeLayerCount(long modelHandle);
     public static native int nativeEmbeddingSize(long modelHandle);
+    public static native long[] nativeTokenize(long modelHandle, byte[] utf8Prompt);
     public static native long nativeCreateShard(long modelHandle, int firstLayer, int lastLayer);
     public static native byte[] nativeExecute(
         long shardHandle,

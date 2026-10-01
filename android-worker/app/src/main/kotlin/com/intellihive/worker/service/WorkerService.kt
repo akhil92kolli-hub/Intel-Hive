@@ -18,6 +18,10 @@ import android.os.IBinder
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import com.intellihive.worker.MainActivity
+import com.intellihive.worker.benchmark.BenchmarkReadiness
+import com.intellihive.worker.benchmark.BenchmarkReadinessStore
+import com.intellihive.worker.benchmark.BenchmarkStatus
+import com.intellihive.worker.inference.QwenShardCatalog
 import com.intellihive.worker.inference.NativeLayerRangeShardExecutor
 import com.intellihive.worker.inference.NativeRuntime
 import com.intellihive.worker.inference.NativeTransportShardExecutor
@@ -53,6 +57,8 @@ class WorkerService : Service() {
     private var heartbeatIntervalSeconds = DEFAULT_HEARTBEAT_SECONDS
     private var registered = false
     private var terminalStatusReported = false
+    private var benchmarkReadiness = BenchmarkReadiness(BenchmarkStatus.NOT_RUN)
+    private var shardCatalogPrepared = false
     private val assignmentExecutorLock = Any()
     private var assignmentExecutor: ShardExecutor? = null
     private val executionMutex = Mutex()
@@ -87,6 +93,19 @@ class WorkerService : Service() {
         initializationJob = serviceScope.launch {
             var nativeExecutor: NativeLayerRangeShardExecutor? = null
             try {
+                check(!isAppServiceRunning(this@WorkerService, BenchmarkService::class.java)) {
+                    "Stop the benchmark before connecting the worker"
+                }
+                val readinessStore = BenchmarkReadinessStore(
+                    java.io.File(filesDir, BenchmarkReadinessStore.FILE_NAME)
+                )
+                benchmarkReadiness = readinessStore.read()
+                if (benchmarkReadiness.status == BenchmarkStatus.RUNNING) {
+                    benchmarkReadiness = BenchmarkReadiness.failed(
+                        "The previous benchmark was interrupted before it completed"
+                    )
+                    readinessStore.write(benchmarkReadiness)
+                }
                 val models = RequiredModelManager(this@WorkerService)
                 val manifest = models.loadManifest()
                 check(models.isInstalled(manifest)) {
@@ -97,6 +116,8 @@ class WorkerService : Service() {
                 }
                 nativeExecutor = NativeLayerRangeShardExecutor(this@WorkerService)
                 nativeExecutor.prepareModel()
+                nativeExecutor.prepareShards(QwenShardCatalog.ranges)
+                shardCatalogPrepared = true
                 synchronized(assignmentExecutorLock) {
                     assignmentExecutor = NativeTransportShardExecutor(nativeExecutor)
                 }
@@ -204,7 +225,12 @@ class WorkerService : Service() {
             DEFAULT_HEARTBEAT_SECONDS
         ).coerceIn(5, 300)
         registered = true
-        reportStatus("Worker ready (benchmark not run)", connected = true)
+        val readyMessage = if (benchmarkReadiness.status == BenchmarkStatus.COMPLETED) {
+            "Worker ready (benchmark completed)"
+        } else {
+            "Worker ready (benchmark not run)"
+        }
+        reportStatus(readyMessage, connected = true)
         heartbeatJob = serviceScope.launch {
             while (isActive) {
                 delay(TimeUnit.SECONDS.toMillis(heartbeatIntervalSeconds.toLong()))
@@ -270,6 +296,9 @@ class WorkerService : Service() {
                         workerId = workerId,
                         sequenceId = assignment.sequenceId,
                         position = assignment.position,
+                        passOrdinal = result.passOrdinal,
+                        kvTokenOffsetBefore = result.kvTokenOffsetBefore,
+                        kvTokenOffsetAfter = result.kvTokenOffsetAfter,
                         activation = result.activation,
                         sampledTokenId = result.sampledTokenId,
                         endOfSequence = result.endOfSequence,
@@ -419,12 +448,40 @@ class WorkerService : Service() {
                 .put("npu", JSONObject().put("available", false)))
             .put("inference", JSONObject()
                 .put("runtime", "llama.cpp")
-                .put("backend", "unknown")
-                .put("benchmark_status", "NOT_RUN"))
+                .put("backend", "cpu")
+                .put("benchmark_status", benchmarkReadiness.status.name)
+                .apply {
+                    benchmarkReadiness.tokensPerSecond?.let { tokensPerSecond ->
+                        put(
+                            "performance",
+                            JSONObject()
+                                .put("tokens_per_second", tokensPerSecond)
+                                .put(
+                                    "execution_mode",
+                                    benchmarkReadiness.executionMode?.wireValue
+                                )
+                        )
+                    }
+                })
             .put("network", JSONObject().put("type", networkType()))
             .put("power", JSONObject()
                 .put("battery_percent", batteryPercent)
                 .put("charging", charging))
+        if (shardCatalogPrepared) {
+            val shards = org.json.JSONArray()
+            QwenShardCatalog.ranges.forEach { range ->
+                shards.put(
+                    JSONObject()
+                        .put("model_id", benchmarkReadiness.modelId)
+                        .put("model_version", benchmarkReadiness.modelVersion)
+                        .put("model_artifact_digest", benchmarkReadiness.modelArtifactDigest)
+                        .put("shard_id", range.shardId)
+                        .put("layer_start", range.layerStart)
+                        .put("layer_end", range.layerEnd)
+                )
+            }
+            payload.put("loaded_shards", shards)
+        }
         return payload
     }
 
@@ -440,7 +497,14 @@ class WorkerService : Service() {
         val chargingStatus = battery?.getIntExtra(BatteryManager.EXTRA_STATUS, -1) ?: -1
         return JSONObject()
             .put("worker_id", workerId)
-            .put("state", if (registered) "UNBENCHMARKED" else "REGISTERING")
+            .put(
+                "state",
+                when {
+                    !registered -> "REGISTERING"
+                    benchmarkReadiness.status == BenchmarkStatus.COMPLETED -> "READY"
+                    else -> "UNBENCHMARKED"
+                }
+            )
             .put("battery_percent", batteryPercent)
             .put("charging", chargingStatus == BatteryManager.BATTERY_STATUS_CHARGING ||
                 chargingStatus == BatteryManager.BATTERY_STATUS_FULL)
@@ -539,8 +603,8 @@ class WorkerService : Service() {
         private const val HEARTBEAT_TIMEOUT_SECONDS = 45L
         private const val BYTES_PER_MB = 1024L * 1024L
         private const val PROTOCOL_VERSION = "phase-0-v3"
-        private const val PREFERENCES = "worker_runtime"
-        private const val KEY_WORKER_ID = "worker_id"
+        const val PREFERENCES = "worker_runtime"
+        const val KEY_WORKER_ID = "worker_id"
         const val KEY_CONNECTED = "connected"
         const val KEY_WORKER_REQUESTED = "worker_requested"
     }

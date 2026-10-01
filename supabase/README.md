@@ -2,7 +2,8 @@
 
 Supabase provides two narrow services for the Android and iOS workers:
 
-- append-only mobile benchmark ingestion through `public.benchmark_results`;
+- append-only mobile benchmark ingestion through `public.benchmark_results`,
+  including whether execution was local across all shards or a distributed pipeline;
 - public model manifests and, when the project permits the object size, GGUF
   artifacts through the `model-artifacts` Storage bucket;
 - public, debug-signed Android test APKs through the `app-builds` bucket.

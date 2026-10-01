@@ -59,6 +59,7 @@ type RuntimeCapabilities struct {
 type BenchmarkInfo struct {
 	Status          string    `json:"status"` // NOT_RUN, RUNNING, COMPLETED, FAILED
 	TokensPerSecond float64   `json:"tokens_per_second,omitempty"`
+	ExecutionMode   string    `json:"execution_mode,omitempty"`
 	LastRunTime     time.Time `json:"last_run_time,omitempty"`
 }
 

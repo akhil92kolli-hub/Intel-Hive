@@ -17,8 +17,11 @@ import androidx.lifecycle.lifecycleScope
 import com.intellihive.worker.model.ModelDownloadState
 import com.intellihive.worker.model.ModelManifest
 import com.intellihive.worker.model.RequiredModelManager
+import com.intellihive.worker.benchmark.BenchmarkReadinessStore
+import com.intellihive.worker.benchmark.BenchmarkStatus
 import com.intellihive.worker.service.BenchmarkService
 import com.intellihive.worker.service.WorkerService
+import com.intellihive.worker.service.isAppServiceRunning
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
@@ -43,6 +46,7 @@ class MainActivity : AppCompatActivity() {
     private var modelReady = false
     private var modelDownloadJob: Job? = null
     private var receiverRegistered = false
+    private var benchmarkReceiverRegistered = false
 
     private val workerStatusReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
@@ -51,6 +55,9 @@ class MainActivity : AppCompatActivity() {
                     ?: "Worker status unavailable"
                 if (intent.hasExtra(WorkerService.EXTRA_CONNECTED)) {
                     val connected = intent.getBooleanExtra(WorkerService.EXTRA_CONNECTED, false)
+                    if (connected) {
+                        statusText.text = "Disconnect the worker before running a benchmark"
+                    }
                     getSharedPreferences("worker_runtime", MODE_PRIVATE)
                         .edit()
                         .putBoolean(WorkerService.KEY_CONNECTED, connected)
@@ -58,7 +65,27 @@ class MainActivity : AppCompatActivity() {
                         .apply()
                 }
                 updateWorkerButton()
+                updateBenchmarkButton()
             }
+        }
+    }
+
+    private val benchmarkStatusReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            if (intent?.action != BenchmarkService.ACTION_STATUS) return
+            val message = intent.getStringExtra(BenchmarkService.EXTRA_MESSAGE)
+                ?: "Benchmark status unavailable"
+            statusText.text = message
+            intent.getStringExtra(BenchmarkService.EXTRA_METRICS)?.let { metricsText.text = it }
+            intent.getIntExtra(BenchmarkService.EXTRA_PROGRESS, -1)
+                .takeIf { it >= 0 }?.let { progressBar.progress = it }
+            benchmarkButton.text = when (intent.getStringExtra(BenchmarkService.EXTRA_STATUS)) {
+                BenchmarkService.STATUS_RUNNING -> "Benchmark running..."
+                BenchmarkService.STATUS_COMPLETED -> "Run benchmark again"
+                BenchmarkService.STATUS_FAILED -> "Retry benchmark"
+                else -> "Run native shard benchmark"
+            }
+            updateBenchmarkButton()
         }
     }
 
@@ -98,6 +125,13 @@ class MainActivity : AppCompatActivity() {
             ContextCompat.RECEIVER_NOT_EXPORTED
         )
         receiverRegistered = true
+        ContextCompat.registerReceiver(
+            this,
+            benchmarkStatusReceiver,
+            IntentFilter(BenchmarkService.ACTION_STATUS),
+            ContextCompat.RECEIVER_NOT_EXPORTED
+        )
+        benchmarkReceiverRegistered = true
         val preferences = getSharedPreferences("worker_runtime", MODE_PRIVATE)
         val serviceRunning = (getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager)
             .getRunningServices(Int.MAX_VALUE)
@@ -109,7 +143,7 @@ class MainActivity : AppCompatActivity() {
                 .apply()
         }
         workerStatusText.text = if (serviceRunning && preferences.getBoolean(WorkerService.KEY_CONNECTED, false)) {
-            "Worker ready (benchmark not run)"
+            "Worker ready"
         } else if (serviceRunning) {
             "Connecting to scheduler..."
         } else {
@@ -117,6 +151,7 @@ class MainActivity : AppCompatActivity() {
         }
         updateWorkerButton()
         refreshModelLifecycle()
+        refreshBenchmarkReadiness()
     }
 
     override fun onStop() {
@@ -126,24 +161,33 @@ class MainActivity : AppCompatActivity() {
             unregisterReceiver(workerStatusReceiver)
             receiverRegistered = false
         }
+        if (benchmarkReceiverRegistered) {
+            unregisterReceiver(benchmarkStatusReceiver)
+            benchmarkReceiverRegistered = false
+        }
         super.onStop()
     }
 
     private fun startBenchmark() {
+        val preferences = getSharedPreferences(WorkerService.PREFERENCES, MODE_PRIVATE)
+        if (isAppServiceRunning(this, WorkerService::class.java) ||
+            preferences.getBoolean(WorkerService.KEY_CONNECTED, false) ||
+            preferences.getBoolean(WorkerService.KEY_WORKER_REQUESTED, false)
+        ) {
+            statusText.text = "Disconnect the worker before running a benchmark"
+            return
+        }
         benchmarkButton.isEnabled = false
         progressBar.progress = 0
-        updateUI("Starting benchmark...")
-
-        lifecycleScope.launch {
-            try {
-                val intent = Intent(this@MainActivity, BenchmarkService::class.java)
-                    .putExtra("prefill_tokens", 128)
-                    .putExtra("generated_tokens", 100)
-                startService(intent)
-            } catch (error: Exception) {
-                updateUI("Error: ${error.message}")
-                benchmarkButton.isEnabled = true
-            }
+        statusText.text = "Starting native shard benchmark..."
+        try {
+            val intent = Intent(this, BenchmarkService::class.java)
+                .putExtra(BenchmarkService.EXTRA_PREFILL_TOKENS, 32)
+                .putExtra(BenchmarkService.EXTRA_GENERATED_TOKENS, 8)
+            ContextCompat.startForegroundService(this, intent)
+        } catch (error: Exception) {
+            statusText.text = "Could not start benchmark: ${error.message ?: "unknown error"}"
+            benchmarkButton.isEnabled = true
         }
     }
 
@@ -171,6 +215,7 @@ class MainActivity : AppCompatActivity() {
             workerStatusText.text = "Connecting to scheduler..."
         }
         updateWorkerButton()
+        updateBenchmarkButton()
     }
 
     private fun updateWorkerButton() {
@@ -179,6 +224,53 @@ class MainActivity : AppCompatActivity() {
             .getBoolean(WorkerService.KEY_WORKER_REQUESTED, false)
         workerConnectionButton.text = if (requested) "Disconnect worker" else "Connect as worker"
         workerConnectionButton.isEnabled = requested || modelReady
+    }
+
+    private fun refreshBenchmarkReadiness() {
+        lifecycleScope.launch {
+            try {
+                val readiness = BenchmarkReadinessStore(
+                    java.io.File(filesDir, BenchmarkReadinessStore.FILE_NAME)
+                ).read()
+                if (readiness.status == BenchmarkStatus.COMPLETED) {
+                    metricsText.text = buildString {
+                        appendLine("Status: ${readiness.status}")
+                        appendLine("Model: ${readiness.modelId} ${readiness.modelVersion}")
+                        appendLine("Execution mode: ${readiness.executionMode?.wireValue ?: "unknown"}")
+                        appendLine("Throughput: ${"%.2f".format(java.util.Locale.US, readiness.tokensPerSecond)} tokens/s")
+                        appendLine("Prefill: ${"%.2f".format(java.util.Locale.US, readiness.prefillSpeedTokensPerSecond)} tokens/s")
+                        appendLine("Decode: ${"%.2f".format(java.util.Locale.US, readiness.generationSpeedTokensPerSecond)} tokens/s")
+                        append("Shards: ${readiness.layerRanges.joinToString { "${it.layerStart}-${it.layerEnd}" }}")
+                    }
+                    statusText.text = "Benchmark completed. Connect to report worker readiness."
+                } else if (readiness.status == BenchmarkStatus.FAILED) {
+                    statusText.text = "Last benchmark failed: ${readiness.errorMessage}"
+                } else if (readiness.status == BenchmarkStatus.RUNNING) {
+                    statusText.text = "A native benchmark was interrupted; retry to report its failure."
+                }
+                benchmarkButton.text = when (readiness.status) {
+                    BenchmarkStatus.NOT_RUN -> "Run native shard benchmark"
+                    BenchmarkStatus.RUNNING -> "Recover benchmark"
+                    BenchmarkStatus.COMPLETED -> "Run benchmark again"
+                    BenchmarkStatus.FAILED -> "Retry benchmark"
+                }
+                updateBenchmarkButton()
+            } catch (error: Exception) {
+                statusText.text = "Could not load benchmark state: ${error.message}"
+                updateBenchmarkButton()
+            }
+        }
+    }
+
+    private fun updateBenchmarkButton() {
+        if (!::benchmarkButton.isInitialized) return
+        val workerActive = isAppServiceRunning(this, WorkerService::class.java) ||
+            getSharedPreferences(WorkerService.PREFERENCES, MODE_PRIVATE)
+                .getBoolean(WorkerService.KEY_CONNECTED, false) ||
+            getSharedPreferences(WorkerService.PREFERENCES, MODE_PRIVATE)
+                .getBoolean(WorkerService.KEY_WORKER_REQUESTED, false)
+        val benchmarkRunning = isAppServiceRunning(this, BenchmarkService::class.java)
+        benchmarkButton.isEnabled = modelReady && !workerActive && !benchmarkRunning
     }
 
     private fun refreshModelLifecycle() {
@@ -218,8 +310,11 @@ class MainActivity : AppCompatActivity() {
             "Model verified • Native engine will initialize when the worker connects"
         modelDownloadButton.text = "Model verified"
         modelDownloadButton.isEnabled = false
-        benchmarkButton.text = "Benchmark unavailable in this build"
-        benchmarkButton.isEnabled = false
+        benchmarkButton.text = "Run native shard benchmark"
+        updateBenchmarkButton()
+        if (isAppServiceRunning(this, WorkerService::class.java)) {
+            statusText.text = "Disconnect the worker before running a benchmark"
+        }
         modelProgressBar.isIndeterminate = false
         modelProgressBar.progress = 100
         updateWorkerButton()

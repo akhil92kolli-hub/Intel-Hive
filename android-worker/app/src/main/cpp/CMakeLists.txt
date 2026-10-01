@@ -71,7 +71,7 @@ target_include_directories(intelhive_layer_range PUBLIC
   "${INTELHIVE_LAYER_RANGE_DIR}"
   "${INTELHIVE_LLAMA_SOURCE_DIR}/ggml/include"
   "${INTELHIVE_LLAMA_SOURCE_DIR}/ggml/src")
-target_link_libraries(intelhive_layer_range PUBLIC ggml ggml-cpu)
+target_link_libraries(intelhive_layer_range PUBLIC ggml ggml-cpu llama)
 
 add_library(intelhive_jni SHARED intelhive_jni.cpp)
 target_link_libraries(intelhive_jni PRIVATE intelhive_layer_range llama android log)

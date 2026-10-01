@@ -3,6 +3,7 @@
 #include "ggml-cpu.h"
 #include "ggml.h"
 #include "gguf.h"
+#include "llama.h"
 
 #include <algorithm>
 #include <cerrno>
@@ -10,8 +11,11 @@
 #include <cstring>
 #include <fcntl.h>
 #include <memory>
+#include <limits>
+#include <mutex>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -29,10 +33,15 @@ GgmlContext create_context(size_t bytes, bool no_alloc = false) {
     return GgmlContext(context, ggml_free);
 }
 
+int graph_thread_count() {
+    const unsigned int available = std::thread::hardware_concurrency();
+    return static_cast<int>(std::max(1U, std::min(available == 0 ? 1U : available, 8U)));
+}
+
 void run_graph(ggml_context* context, ggml_tensor* output) {
     auto* graph = ggml_new_graph(context);
     ggml_build_forward_expand(graph, output);
-    if (ggml_graph_compute_with_ctx(context, graph, 1) != GGML_STATUS_SUCCESS) {
+    if (ggml_graph_compute_with_ctx(context, graph, graph_thread_count()) != GGML_STATUS_SUCCESS) {
         throw std::runtime_error("ggml graph execution failed");
     }
 }
@@ -122,12 +131,29 @@ struct Qwen2GgufModel::Impl {
     }
 
     void cleanup() noexcept {
+        if (tokenizer_model != nullptr) llama_model_free(tokenizer_model);
+        tokenizer_model = nullptr;
         if (metadata != nullptr) gguf_free(metadata);
         metadata = nullptr;
         if (mapped_data != nullptr) munmap(const_cast<uint8_t*>(mapped_data), mapped_size);
         mapped_data = nullptr;
         if (file_descriptor >= 0) close(file_descriptor);
         file_descriptor = -1;
+    }
+
+    const llama_vocab* tokenizer_vocab() const {
+        std::lock_guard<std::mutex> lock(tokenizer_mutex);
+        if (tokenizer_model == nullptr) {
+            static std::once_flag backend_once;
+            std::call_once(backend_once, llama_backend_init);
+            auto params = llama_model_default_params();
+            params.vocab_only = true;
+            tokenizer_model = llama_model_load_from_file(model_path.c_str(), params);
+            if (tokenizer_model == nullptr) {
+                throw std::runtime_error("load GGUF tokenizer vocabulary failed: " + model_path);
+            }
+        }
+        return llama_model_get_vocab(tokenizer_model);
     }
 
     TensorDescriptor tensor_descriptor(const std::string& name, int64_t dim0, int64_t dim1) const {
@@ -197,6 +223,8 @@ struct Qwen2GgufModel::Impl {
     const uint8_t* mapped_data = nullptr;
     size_t mapped_size = 0;
     gguf_context* metadata = nullptr;
+    mutable std::mutex tokenizer_mutex;
+    mutable llama_model* tokenizer_model = nullptr;
     Qwen2Config config {};
 };
 
@@ -359,6 +387,27 @@ const Qwen2Config& Qwen2GgufModel::config() const {
 
 const std::string& Qwen2GgufModel::path() const {
     return impl_->model_path;
+}
+
+std::vector<int32_t> Qwen2GgufModel::tokenize(const std::string& text) const {
+    if (text.empty()) throw std::invalid_argument("prompt text must not be empty");
+    const llama_vocab* vocab = impl_->tokenizer_vocab();
+    std::vector<llama_token> tokens(std::max<size_t>(16, text.size() + 2));
+    int32_t count = llama_tokenize(
+        vocab, text.data(), static_cast<int32_t>(text.size()), tokens.data(),
+        static_cast<int32_t>(tokens.size()), true, false);
+    if (count == std::numeric_limits<int32_t>::min()) {
+        throw std::overflow_error("tokenized prompt is too large");
+    }
+    if (count < 0) {
+        tokens.resize(static_cast<size_t>(-count));
+        count = llama_tokenize(
+            vocab, text.data(), static_cast<int32_t>(text.size()), tokens.data(),
+            static_cast<int32_t>(tokens.size()), true, false);
+    }
+    if (count <= 0) throw std::runtime_error("GGUF tokenizer produced no tokens");
+    tokens.resize(static_cast<size_t>(count));
+    return {tokens.begin(), tokens.end()};
 }
 
 std::vector<float> Qwen2GgufModel::embed_token(uint32_t token_id) const {

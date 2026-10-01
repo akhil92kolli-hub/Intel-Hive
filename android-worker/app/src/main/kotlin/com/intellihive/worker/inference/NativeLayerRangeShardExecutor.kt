@@ -15,6 +15,8 @@ internal class NativeLayerRangeBindings {
     fun nativeLoadModel(modelPath: String): Long = NativeBridge.nativeLoadModel(modelPath)
     fun nativeLayerCount(modelHandle: Long): Int = NativeBridge.nativeLayerCount(modelHandle)
     fun nativeEmbeddingSize(modelHandle: Long): Int = NativeBridge.nativeEmbeddingSize(modelHandle)
+    fun nativeTokenize(modelHandle: Long, prompt: String): LongArray =
+        NativeBridge.nativeTokenize(modelHandle, prompt.toByteArray(Charsets.UTF_8))
     fun nativeCreateShard(modelHandle: Long, firstLayer: Int, lastLayer: Int): Long =
         NativeBridge.nativeCreateShard(modelHandle, firstLayer, lastLayer)
     fun nativeExecute(
@@ -46,7 +48,7 @@ internal class NativeLayerRangeBindings {
 class NativeLayerRangeShardExecutor(
     context: Context,
     private val modelFile: File = RequiredModelManager.defaultModelFile(context)
-) : NativeShardExecutor, AutoCloseable {
+) : NativeShardExecutor, NativePromptTokenizer, AutoCloseable {
     private val bindings = NativeLayerRangeBindings()
     private val lock = Any()
     private val modelHandles = mutableMapOf<ModelKey, LoadedModel>()
@@ -57,14 +59,30 @@ class NativeLayerRangeShardExecutor(
             check(NativeRuntime.isAvailable()) {
                 "IntelHive native runtime is unavailable: ${NativeRuntime.unavailableReason()}"
             }
-            loadModel(
-                ModelKey(
-                    MODEL_ID,
-                    MODEL_VERSION,
-                    ModelManifest.PINNED_ARTIFACT_DIGEST
-                )
-            )
+            loadedModel()
             Unit
+        }
+    }
+
+    suspend fun prepareShards(ranges: List<ModelShardRange>) = withContext(Dispatchers.IO) {
+        synchronized(lock) {
+            val model = loadedModel()
+            ranges.forEach { range ->
+                require(range.layerStart >= 0 && range.layerEnd >= range.layerStart &&
+                    range.layerEnd < model.layerCount) {
+                    "requested layer range ${range.layerStart}-${range.layerEnd} is invalid for this model"
+                }
+                shardHandle(model, range)
+            }
+        }
+    }
+
+    override suspend fun tokenize(prompt: String): List<Long> = withContext(Dispatchers.Default) {
+        require(prompt.isNotBlank()) { "prompt must not be blank" }
+        synchronized(lock) {
+            bindings.nativeTokenize(loadedModel().handle, prompt).toList().also { tokens ->
+                require(tokens.isNotEmpty()) { "GGUF tokenizer returned no tokens" }
+            }
         }
     }
 
@@ -75,24 +93,14 @@ class NativeLayerRangeShardExecutor(
                 check(NativeRuntime.isAvailable()) {
                     "IntelHive native runtime is unavailable: ${NativeRuntime.unavailableReason()}"
                 }
-                val modelKey = ModelKey(
-                    MODEL_ID,
-                    MODEL_VERSION,
-                    ModelManifest.PINNED_ARTIFACT_DIGEST
-                )
-                val model = modelHandles[modelKey] ?: loadModel(modelKey)
+                val model = loadedModel()
                 require(request.shard.layerEnd < model.layerCount) {
                     "requested layer range exceeds the loaded model"
                 }
-                val shardKey = ShardKey(modelKey, request.shard.layerStart, request.shard.layerEnd)
-                val shardHandle = shardHandles[shardKey] ?: bindings.nativeCreateShard(
-                    model.handle,
-                    shardKey.firstLayer,
-                    shardKey.lastLayer
-                ).also { handle ->
-                    check(handle > 0L) { "Native shard creation returned an invalid handle" }
-                    shardHandles[shardKey] = handle
-                }
+                val shardHandle = shardHandle(
+                    model,
+                    ModelShardRange(request.shard.id, request.shard.layerStart, request.shard.layerEnd)
+                )
 
                 val tokenIds: LongArray?
                 val activation: ByteArray?
@@ -254,6 +262,24 @@ class NativeLayerRangeShardExecutor(
         } catch (error: Exception) {
             bindings.nativeUnloadModel(handle)
             throw error
+        }
+    }
+
+    private fun loadedModel(): LoadedModel {
+        val key = ModelKey(MODEL_ID, MODEL_VERSION, ModelManifest.PINNED_ARTIFACT_DIGEST)
+        return modelHandles[key] ?: loadModel(key)
+    }
+
+    private fun shardHandle(model: LoadedModel, range: ModelShardRange): Long {
+        val key = ModelKey(MODEL_ID, MODEL_VERSION, ModelManifest.PINNED_ARTIFACT_DIGEST)
+        val shardKey = ShardKey(key, range.layerStart, range.layerEnd)
+        return shardHandles[shardKey] ?: bindings.nativeCreateShard(
+            model.handle,
+            range.layerStart,
+            range.layerEnd
+        ).also { handle ->
+            check(handle > 0L) { "Native shard creation returned an invalid handle" }
+            shardHandles[shardKey] = handle
         }
     }
 

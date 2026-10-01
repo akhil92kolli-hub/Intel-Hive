@@ -148,7 +148,7 @@ func (w *RemoteWorker) Execute(ctx context.Context, job worker.Job) (worker.JobR
 	w.pendingMu.Unlock()
 
 	assignment := protocol.JobAssignment{
-		RequestID: job.RequestID, ModelVersion: job.ModelVersion, WorkerID: w.id, PreviousWorker: job.PreviousWorker, NextWorker: job.NextWorker,
+		RequestID: job.RequestID, ModelVersion: job.ModelVersion, ModelArtifactDigest: job.ModelArtifactDigest, WorkerID: w.id, PreviousWorker: job.PreviousWorker, NextWorker: job.NextWorker,
 		AssignmentID:  assignmentID,
 		JobID:         job.ID,
 		ModelID:       job.ModelID,
@@ -156,6 +156,9 @@ func (w *RemoteWorker) Execute(ctx context.Context, job worker.Job) (worker.JobR
 		Phase:         protocol.InferencePhase(job.Phase),
 		SequenceID:    job.SequenceID,
 		Position:      job.Position,
+		PassOrdinal:   job.PassOrdinal,
+		KVTokenOffset: job.KVTokenOffset,
+		TokenCount:    job.TokenCount,
 		Prompt:        job.Prompt,
 		InputTokenIDs: job.InputTokenIDs,
 		Activation:    job.Activation,
@@ -208,6 +211,24 @@ func (w *RemoteWorker) Complete(message protocol.JobComplete) error {
 		return fmt.Errorf("job completion sequence_id or position does not match assignment")
 	}
 	if ok && pending.sequenceID != "" {
+		job := pending.job
+		if message.PassOrdinal != job.PassOrdinal ||
+			message.KVTokenOffsetBefore != job.KVTokenOffset ||
+			message.KVTokenOffsetAfter <= message.KVTokenOffsetBefore {
+			w.pendingMu.Unlock()
+			return fmt.Errorf("job completion execution metadata does not match assignment")
+		}
+		actualTokenCount := message.KVTokenOffsetAfter - message.KVTokenOffsetBefore
+		if job.TokenCount > 0 && actualTokenCount != job.TokenCount {
+			w.pendingMu.Unlock()
+			return fmt.Errorf("job completion token count does not match assignment")
+		}
+		if job.TokenCount == 0 && job.Prompt == "" {
+			w.pendingMu.Unlock()
+			return fmt.Errorf("job completion resolved a token count for a non-prompt assignment")
+		}
+	}
+	if ok && pending.sequenceID != "" {
 		if pending.finalShard {
 			if (message.SampledTokenID != nil) == message.EndOfSequence || message.Activation != nil {
 				w.pendingMu.Unlock()
@@ -223,6 +244,17 @@ func (w *RemoteWorker) Complete(message protocol.JobComplete) error {
 		if err := message.Activation.ValidateBoundary(j.ID, j.RequestID, j.SequenceID, j.ModelID, j.ModelVersion, w.id, j.NextWorker, j.Layers.End, j.Position); err != nil {
 			w.pendingMu.Unlock()
 			return err
+		}
+		if err := message.Activation.ValidateCanonical(); err != nil {
+			w.pendingMu.Unlock()
+			return err
+		}
+		if message.Activation.ModelArtifactDigest != j.ModelArtifactDigest ||
+			message.Activation.PassOrdinal != message.PassOrdinal ||
+			message.Activation.KVTokenOffset != message.KVTokenOffsetBefore ||
+			message.Activation.TokenCount != message.KVTokenOffsetAfter-message.KVTokenOffsetBefore {
+			w.pendingMu.Unlock()
+			return fmt.Errorf("activation execution metadata does not match completion")
 		}
 	}
 	if ok {
@@ -241,6 +273,8 @@ func (w *RemoteWorker) Complete(message protocol.JobComplete) error {
 		Activation: message.Activation, SampledTokenID: message.SampledTokenID,
 		EndOfSequence: message.EndOfSequence, GeneratedText: message.GeneratedText,
 		TokensPerSec: message.TokensPerSec, LayerCount: message.LayerCount,
+		PassOrdinal: message.PassOrdinal, KVTokenOffsetBefore: message.KVTokenOffsetBefore,
+		KVTokenOffsetAfter: message.KVTokenOffsetAfter,
 	}}
 	return nil
 }

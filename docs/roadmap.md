@@ -84,12 +84,13 @@ per-device Android requirements or a general guarantee for other prompts,
 GGUF quantizations, backends, or model architectures.
 
 The independent CPU reference check gives a **GO for the host layer-range
-execution approach** on this model and pinned llama.cpp revision. M1 remains
-incomplete: the host test does not implement tokenizer-driven text generation
-or integrate with Android. The scheduler owns pipeline assignment; IntelHive's
+execution approach** on this model and pinned llama.cpp revision. The native
+model now uses the pinned llama.cpp GGUF vocabulary for prompt tokenization,
+and Android routes scheduler assignments into the same shard executor used by
+its on-device benchmark. The scheduler owns pipeline assignment; IntelHive's
 worker runtime owns local shard execution and sequence state, while llama.cpp/
-ggml is only a local compute backend. Android native/backend integration and
-real-device tests (T013 onward) remain required for M1.
+ggml is only a local compute backend. M1 remains incomplete until activation
+transport is proven across two and then three independent Android devices.
 
 ### M2 — Worker failure and replacement
 

@@ -15,10 +15,11 @@ import (
 )
 
 type ShardAssignment struct {
-	ModelVersion string
-	ShardID      string
-	Layer        model.LayerRange
-	WorkerID     string
+	ModelVersion        string
+	ModelArtifactDigest string
+	ShardID             string
+	Layer               model.LayerRange
+	WorkerID            string
 }
 
 type AssignmentPlan struct {
@@ -106,7 +107,7 @@ func (s *Scheduler) BuildPlan(jobID, modelID string, shards []model.ModelShard) 
 		})
 		selected := eligible[0]
 		used[selected.ID] = true
-		plan.Shards = append(plan.Shards, ShardAssignment{ModelVersion: shard.Version, ShardID: shard.ID, Layer: shard.Layers, WorkerID: selected.ID})
+		plan.Shards = append(plan.Shards, ShardAssignment{ModelVersion: shard.Version, ModelArtifactDigest: shard.ArtifactDigest, ShardID: shard.ID, Layer: shard.Layers, WorkerID: selected.ID})
 		plan.WorkerIDs = append(plan.WorkerIDs, selected.ID)
 	}
 	return plan, nil
@@ -143,7 +144,7 @@ func (s *Scheduler) Execute(ctx context.Context, plan AssignmentPlan, payload []
 		shards := make([]model.ModelShard, len(plan.Shards))
 		for i, assignment := range plan.Shards {
 			shards[i] = model.ModelShard{
-				ID: assignment.ShardID, Version: assignment.ModelVersion, ModelID: plan.ModelID, Layers: assignment.Layer,
+				ID: assignment.ShardID, Version: assignment.ModelVersion, ArtifactDigest: assignment.ModelArtifactDigest, ModelID: plan.ModelID, Layers: assignment.Layer,
 			}
 		}
 		currentPlan, err = s.BuildPlan(plan.JobID, plan.ModelID, shards)
@@ -207,7 +208,7 @@ func (s *Scheduler) Generate(
 		shards := make([]model.ModelShard, len(plan.Shards))
 		for i, assignment := range plan.Shards {
 			shards[i] = model.ModelShard{
-				ID: assignment.ShardID, Version: assignment.ModelVersion, ModelID: plan.ModelID, Layers: assignment.Layer,
+				ID: assignment.ShardID, Version: assignment.ModelVersion, ArtifactDigest: assignment.ModelArtifactDigest, ModelID: plan.ModelID, Layers: assignment.Layer,
 			}
 		}
 		currentPlan, err = s.BuildPlan(plan.JobID, plan.ModelID, shards)
@@ -259,18 +260,21 @@ func (s *Scheduler) generateOnce(
 	started := time.Now()
 	generated := GenerationResult{JobID: plan.JobID, TokenIDs: make([]uint32, 0, maxTokens)}
 	var nextToken []uint32
+	var kvTokenOffset uint32
 	for position := uint32(0); len(generated.TokenIDs) < maxTokens; position++ {
 		phase := "DECODE"
 		stepPrompt := ""
 		stepTokenIDs := nextToken
+		tokenCount := uint32(1)
 		if position == 0 {
 			phase = "PREFILL"
 			stepPrompt = prompt
 			stepTokenIDs = nil
+			tokenCount = 0
 		}
 
 		stepResult, err := s.executeInferenceStep(
-			ctx, plan, sequenceID, phase, position, stepPrompt, stepTokenIDs,
+			ctx, plan, sequenceID, phase, position, kvTokenOffset, tokenCount, stepPrompt, stepTokenIDs,
 		)
 		if err != nil {
 			return GenerationResult{}, err
@@ -278,6 +282,7 @@ func (s *Scheduler) generateOnce(
 		if stepResult.EndOfSequence {
 			break
 		}
+		kvTokenOffset = stepResult.KVTokenOffsetAfter
 		token := *stepResult.SampledTokenID
 		generated.TokenIDs = append(generated.TokenIDs, token)
 		generated.Text = append(generated.Text, stepResult.GeneratedText...)
@@ -295,6 +300,8 @@ func (s *Scheduler) executeInferenceStep(
 	plan AssignmentPlan,
 	sequenceID, phase string,
 	position uint32,
+	kvTokenOffset uint32,
+	tokenCount uint32,
 	prompt string,
 	inputTokenIDs []uint32,
 ) (worker.JobResult, error) {
@@ -309,11 +316,11 @@ func (s *Scheduler) executeInferenceStep(
 	assignments := make([]pipeline.ShardAssignment, len(plan.Shards))
 	for i, assignment := range plan.Shards {
 		assignments[i] = pipeline.ShardAssignment{
-			ModelVersion: assignment.ModelVersion, ShardID: assignment.ShardID, Layer: assignment.Layer, WorkerID: assignment.WorkerID,
+			ModelVersion: assignment.ModelVersion, ModelArtifactDigest: assignment.ModelArtifactDigest, ShardID: assignment.ShardID, Layer: assignment.Layer, WorkerID: assignment.WorkerID,
 		}
 	}
 	return executor.ExecuteInferenceStep(
-		ctx, plan.JobID, plan.ModelID, sequenceID, phase, position,
+		ctx, plan.JobID, plan.ModelID, sequenceID, phase, position, kvTokenOffset, tokenCount,
 		prompt, inputTokenIDs, assignments,
 	)
 }
@@ -334,7 +341,7 @@ func (s *Scheduler) executePlan(
 	shards := make([]pipeline.ShardAssignment, len(plan.Shards))
 	for i, assignment := range plan.Shards {
 		shards[i] = pipeline.ShardAssignment{
-			ModelVersion: assignment.ModelVersion, ShardID: assignment.ShardID, Layer: assignment.Layer, WorkerID: assignment.WorkerID,
+			ModelVersion: assignment.ModelVersion, ModelArtifactDigest: assignment.ModelArtifactDigest, ShardID: assignment.ShardID, Layer: assignment.Layer, WorkerID: assignment.WorkerID,
 		}
 	}
 	return executor.Execute(ctx, pipeline.DistributedJob{

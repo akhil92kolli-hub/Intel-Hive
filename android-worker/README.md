@@ -5,8 +5,9 @@
 The Android worker is a Kotlin application with a scheduler WebSocket runtime,
 an IntelHive-owned shard inference contract, and a JNI adapter for IntelHive's
 Qwen2 layer-range executor. The shard executor uses the same pinned llama.cpp
-source revision as the host feasibility tests. The full-model llama.cpp
-benchmark adapter remains separate and is not used for shard execution.
+source revision as the host feasibility tests. The device benchmark runs the
+production executor through all three logical shards with real prefill, decode,
+and KV positions.
 
 ## Architecture
 
@@ -28,8 +29,8 @@ AndroidWorker
 │   └── metrics collection
 ├── NativeLayerRangeShardExecutor
 │   └── transport-neutral contract → JNI → IntelHive Qwen2 layer-range engine
-├── LlamaCppBenchmarkEngine
-│   └── full-model local benchmark only; not a shard executor
+├── NativeShardBenchmarkEngine
+│   └── production executor benchmark across all three local logical shards
 │
 ├── RequiredModelManager
 │   ├── manifest loading
@@ -75,8 +76,13 @@ payload checksums. WebSocket assignments now carry the complete activation
 envelope, including request identity, worker route, pass position, dtype,
 shape, and checksum. The Android worker validates this envelope before handing it to the native
 executor. The current Android backend supports only the configured Qwen2.5-3B
-Q4_K_M model, F32 row-major activations, and CPU execution.
-It does not yet establish networked multi-phone M1, GPU acceleration, generic
+Q4_K_M model, F32 row-major activations, and multithreaded CPU execution. The
+transport adapter accepts prompt text only for the first prefill shard,
+tokenizes it with the loaded GGUF vocabulary, and constructs an explicit
+token-count/KV-offset request before entering the native backend.
+Benchmark output uses `execution_mode=single_device_all_shards`; this does not
+establish activation transport between independent workers. It does not yet
+establish networked multi-phone M1, GPU acceleration, generic
 GGUF/architecture support, or KV-state migration. The instrumented three-shard
 test runs the ranges sequentially on one Android device and tests prefill plus
 one decode step.
@@ -179,40 +185,23 @@ gradle -p android-worker \
   :app:assembleDebug
 ```
 
-An exported result has this shape:
+An exported and uploaded result includes:
 
 ```json
 {
-  "timestamp": "2026-09-27T10:30:00Z",
-  "model": "qwen2.5-3b-instruct",
-  "quantization": "Q4_K_M",
-  "device": {
-    "model": "Pixel 6",
-    "android_version": "14",
-    "ram_mb": 8192,
-    "gpu": "Adreno 650"
-  },
-  "benchmark": {
-    "prefill_tokens": 128,
-    "generated_tokens": 100,
-    "total_time_ms": 12345,
-    "tokens_per_second": 8.1,
-    "prefill_speed_tokens_per_second": 100.5,
-    "generation_speed_tokens_per_second": 8.1
-  },
-  "memory": {
-    "peak_rss_mb": 3500,
-    "peak_gpu_mb": 1200
-  },
-  "thermal": {
-    "initial_temp_c": 32.5,
-    "peak_temp_c": 44.2,
-    "final_temp_c": 38.1
-  },
-  "activations": {
-    "layer_output_size_bytes": 1572864,
-    "dtype": "float32",
-    "shape": [1, 128, 3072]
-  }
+  "status": "COMPLETED",
+  "execution_mode": "single_device_all_shards",
+  "model_id": "qwen2.5-3b-instruct",
+  "prefill_tokens": 32,
+  "generated_tokens": 8,
+  "tokens_per_second": 0.07,
+  "layer_ranges": [
+    {"shardId": "s0", "layerStart": 0, "layerEnd": 9},
+    {"shardId": "s1", "layerStart": 10, "layerEnd": 19},
+    {"shardId": "s2", "layerStart": 20, "layerEnd": 35}
+  ]
 }
 ```
+
+The CPU/Vulkan boundary and the work required for a real Vulkan backend are
+recorded in `docs/android-native-backends.md`.

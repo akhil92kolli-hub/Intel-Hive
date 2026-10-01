@@ -13,15 +13,34 @@ class NativeTransportShardExecutor(
 ) : TransportExecutor, AutoCloseable {
     override suspend fun execute(assignment: WorkerJobAssignment): TransportResult {
         assignment.validate()?.let { throw IllegalArgumentException(it) }
-        val request = WorkerAssignmentAdapter.toExecutionRequest(assignment)
+        val normalized = if (!assignment.prompt.isNullOrEmpty()) {
+            val tokenizer = native as? NativePromptTokenizer
+                ?: throw UnsupportedOperationException("native executor does not provide a prompt tokenizer")
+            val tokenIds = tokenizer.tokenize(assignment.prompt)
+            require(tokenIds.isNotEmpty()) { "prompt tokenizer returned no tokens" }
+            assignment.copy(prompt = null, inputTokenIds = tokenIds, tokenCount = tokenIds.size.toLong())
+        } else {
+            assignment
+        }
+        val request = WorkerAssignmentAdapter.toExecutionRequest(normalized)
         val result = native.execute(request)
-        WorkerAssignmentAdapter.validateResult(request, result, assignment.finalShard)
+        WorkerAssignmentAdapter.validateResult(request, result, normalized.finalShard)
             ?.let { throw IllegalStateException(it) }
         return when (result.outputType) {
-            ShardOutputType.ACTIVATION -> activationResult(assignment, result)
-            ShardOutputType.TOKEN -> TransportResult(sampledTokenId = result.tokenId
-                ?: throw IllegalStateException("token output requires tokenId"))
-            ShardOutputType.EOS -> TransportResult(endOfSequence = true)
+            ShardOutputType.ACTIVATION -> activationResult(normalized, result)
+            ShardOutputType.TOKEN -> TransportResult(
+                passOrdinal = result.passOrdinal,
+                kvTokenOffsetBefore = result.kvTokenOffsetBefore,
+                kvTokenOffsetAfter = result.kvTokenOffsetAfter,
+                sampledTokenId = result.tokenId
+                    ?: throw IllegalStateException("token output requires tokenId")
+            )
+            ShardOutputType.EOS -> TransportResult(
+                passOrdinal = result.passOrdinal,
+                kvTokenOffsetBefore = result.kvTokenOffsetBefore,
+                kvTokenOffsetAfter = result.kvTokenOffsetAfter,
+                endOfSequence = true
+            )
             ShardOutputType.LOGITS -> throw UnsupportedOperationException(
                 "central sampling for logits output is not implemented")
         }
@@ -40,7 +59,11 @@ class NativeTransportShardExecutor(
     ): TransportResult {
         val spec = checkNotNull(result.tensorSpec)
         val payload = checkNotNull(result.payload)
-        return TransportResult(activation = Activation(
+        return TransportResult(
+            passOrdinal = result.passOrdinal,
+            kvTokenOffsetBefore = result.kvTokenOffsetBefore,
+            kvTokenOffsetAfter = result.kvTokenOffsetAfter,
+            activation = Activation(
             passOrdinal = result.passOrdinal,
             kvTokenOffset = result.kvTokenOffsetBefore,
             tokenCount = assignment.tokenCount,
@@ -60,7 +83,8 @@ class NativeTransportShardExecutor(
             byteLength = spec.byteLength,
             payload = payload,
             checksum = Activation.checksum(payload)
-        ))
+            )
+        )
     }
 }
 

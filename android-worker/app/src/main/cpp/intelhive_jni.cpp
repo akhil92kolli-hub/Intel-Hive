@@ -174,6 +174,33 @@ Java_com_intelhive_worker_inference_NativeBridge_nativeEmbeddingSize(
     }
 }
 
+extern "C" JNIEXPORT jlongArray JNICALL
+Java_com_intelhive_worker_inference_NativeBridge_nativeTokenize(
+        JNIEnv* env, jobject, jlong model_handle, jbyteArray utf8_prompt) {
+    try {
+        if (utf8_prompt == nullptr) throw std::invalid_argument("UTF-8 prompt is required");
+        const jsize byte_count = env->GetArrayLength(utf8_prompt);
+        if (byte_count <= 0) throw std::invalid_argument("prompt must not be empty");
+        std::string prompt(static_cast<size_t>(byte_count), '\0');
+        env->GetByteArrayRegion(
+            utf8_prompt, 0, byte_count, reinterpret_cast<jbyte*>(prompt.data()));
+        if (env->ExceptionCheck()) throw std::runtime_error("could not read UTF-8 prompt");
+        const auto tokens = get_model(model_handle)->tokenize(prompt);
+        if (tokens.size() > static_cast<size_t>(std::numeric_limits<jsize>::max())) {
+            throw std::overflow_error("tokenized prompt exceeds the JNI array limit");
+        }
+        auto result = env->NewLongArray(static_cast<jsize>(tokens.size()));
+        if (result == nullptr) throw std::runtime_error("could not allocate token ID array");
+        std::vector<jlong> values(tokens.begin(), tokens.end());
+        env->SetLongArrayRegion(result, 0, static_cast<jsize>(values.size()), values.data());
+        if (env->ExceptionCheck()) throw std::runtime_error("could not marshal token IDs");
+        return result;
+    } catch (const std::exception& error) {
+        throw_state(env, error);
+        return nullptr;
+    }
+}
+
 extern "C" JNIEXPORT jlong JNICALL
 Java_com_intelhive_worker_inference_NativeBridge_nativeCreateShard(
         JNIEnv* env, jobject, jlong model_handle, jint first_layer, jint last_layer) {
@@ -363,6 +390,8 @@ extern "C" JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void*) {
             reinterpret_cast<void*>(Java_com_intelhive_worker_inference_NativeBridge_nativeLayerCount)},
         {const_cast<char*>("nativeEmbeddingSize"), const_cast<char*>("(J)I"),
             reinterpret_cast<void*>(Java_com_intelhive_worker_inference_NativeBridge_nativeEmbeddingSize)},
+        {const_cast<char*>("nativeTokenize"), const_cast<char*>("(J[B)[J"),
+            reinterpret_cast<void*>(Java_com_intelhive_worker_inference_NativeBridge_nativeTokenize)},
         {const_cast<char*>("nativeCreateShard"), const_cast<char*>("(JII)J"),
             reinterpret_cast<void*>(Java_com_intelhive_worker_inference_NativeBridge_nativeCreateShard)},
         {const_cast<char*>("nativeExecute"), const_cast<char*>("(JLjava/lang/String;II[J[B)[B"),

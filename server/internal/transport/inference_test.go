@@ -30,9 +30,9 @@ func TestInferenceDispatchesAcrossRegisteredWorkers(t *testing.T) {
 	defer server.Close()
 
 	shards := []protocol.LoadedShardInfo{
-		{ModelVersion: "v1", ModelID: "qwen2.5-3b-instruct", ShardID: "s0", LayerStart: 0, LayerEnd: 11},
-		{ModelVersion: "v1", ModelID: "qwen2.5-3b-instruct", ShardID: "s1", LayerStart: 12, LayerEnd: 23},
-		{ModelVersion: "v1", ModelID: "qwen2.5-3b-instruct", ShardID: "s2", LayerStart: 24, LayerEnd: 35},
+		{ModelVersion: "v1", ModelID: "qwen2.5-3b-instruct", ModelArtifactDigest: testModelDigest, ShardID: "s0", LayerStart: 0, LayerEnd: 11},
+		{ModelVersion: "v1", ModelID: "qwen2.5-3b-instruct", ModelArtifactDigest: testModelDigest, ShardID: "s1", LayerStart: 12, LayerEnd: 23},
+		{ModelVersion: "v1", ModelID: "qwen2.5-3b-instruct", ModelArtifactDigest: testModelDigest, ShardID: "s2", LayerStart: 24, LayerEnd: 35},
 	}
 	connections := make([]*websocket.Conn, 0, len(shards))
 	assignments := make(chan protocol.JobAssignment, 9)
@@ -47,7 +47,7 @@ func TestInferenceDispatchesAcrossRegisteredWorkers(t *testing.T) {
 			Memory:          protocol.MemoryInfo{TotalMB: 8192, AvailableMB: 4096},
 			Inference: protocol.InferenceInfo{
 				Runtime: "llama.cpp", Backend: "cpu", BenchmarkStatus: "COMPLETED",
-				Performance: &protocol.PerformanceInfo{TokensPerSecond: 2},
+				Performance: &protocol.PerformanceInfo{TokensPerSecond: 2, ExecutionMode: protocol.BenchmarkExecutionModeSingleDeviceAllShards},
 			},
 			LoadedShards: []protocol.LoadedShardInfo{shard},
 		})
@@ -81,6 +81,8 @@ func TestInferenceDispatchesAcrossRegisteredWorkers(t *testing.T) {
 		t.Fatal(err)
 	}
 	if result.JobID != "test-job" || result.ModelID != "qwen2.5-3b-instruct" ||
+		result.ExecutionMode != protocol.BenchmarkExecutionModeDistributedPipeline ||
+		len(result.WorkerIDs) != 3 ||
 		result.Output != "AB" || len(result.GeneratedTokenIDs) != 2 ||
 		result.GeneratedTokenIDs[0] != 101 || result.GeneratedTokenIDs[1] != 102 {
 		t.Fatalf("unexpected distributed inference result: %+v", result)
@@ -152,6 +154,25 @@ func TestInferenceRejectsOutOfRangeMaxTokens(t *testing.T) {
 	}
 }
 
+func TestPlanExecutionMode(t *testing.T) {
+	tests := []struct {
+		name      string
+		workerIDs []string
+		want      string
+	}{
+		{name: "one worker owns every shard", workerIDs: []string{"worker-a", "worker-a", "worker-a"}, want: protocol.BenchmarkExecutionModeSingleDeviceAllShards},
+		{name: "shards span workers", workerIDs: []string{"worker-a", "worker-b", "worker-c"}, want: protocol.BenchmarkExecutionModeDistributedPipeline},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got := planExecutionMode(scheduler.AssignmentPlan{WorkerIDs: test.workerIDs})
+			if got != test.want {
+				t.Fatalf("planExecutionMode() = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
 func dialWorker(t *testing.T, serverURL string) *websocket.Conn {
 	t.Helper()
 	endpoint, err := url.Parse(serverURL)
@@ -184,9 +205,15 @@ func respondToAssignments(conn *websocket.Conn, assignments chan<- protocol.JobA
 		_ = conn.WriteJSON(workerMessageForTest("job_accepted", protocol.JobAccepted{
 			AssignmentID: assignment.AssignmentID, Accepted: true,
 		}))
+		resolvedTokenCount := assignment.TokenCount
+		if resolvedTokenCount == 0 {
+			resolvedTokenCount = 2
+		}
 		completion := protocol.JobComplete{
 			AssignmentID: assignment.AssignmentID, JobID: assignment.JobID, WorkerID: workerIDFromShard(assignment.ShardID),
 			Status: "completed", SequenceID: assignment.SequenceID, Position: assignment.Position,
+			PassOrdinal: assignment.PassOrdinal, KVTokenOffsetBefore: assignment.KVTokenOffset,
+			KVTokenOffsetAfter: assignment.KVTokenOffset + resolvedTokenCount,
 		}
 		if assignment.FinalShard {
 			if assignment.Phase == protocol.InferencePhasePrefill || assignment.Position == 1 {
@@ -197,13 +224,23 @@ func respondToAssignments(conn *websocket.Conn, assignments chan<- protocol.JobA
 				completion.EndOfSequence = true
 			}
 		} else {
-			a := activation.NewEnvelope(assignment.JobID, assignment.RequestID, assignment.SequenceID, assignment.ModelID, assignment.ModelVersion, completion.WorkerID, assignment.NextWorker, assignment.LayerEnd, "uint8", []int64{1}, []byte{1})
+			payload := make([]byte, int(resolvedTokenCount)*4)
+			a := activation.NewEnvelope(assignment.JobID, assignment.RequestID, assignment.SequenceID, assignment.ModelID, assignment.ModelVersion, completion.WorkerID, assignment.NextWorker, assignment.LayerEnd, "F32", []int64{int64(resolvedTokenCount), 1}, payload)
 			a.Position = assignment.Position
+			a.PassOrdinal = assignment.PassOrdinal
+			a.KVTokenOffset = assignment.KVTokenOffset
+			a.TokenCount = resolvedTokenCount
+			a.ModelArtifactDigest = assignment.ModelArtifactDigest
+			a.Layout = "ROW_MAJOR_CONTIGUOUS"
+			a.ByteOrder = "LITTLE_ENDIAN"
+			a.ByteLength = uint64(len(payload))
 			completion.Activation = &a
 		}
 		_ = conn.WriteJSON(workerMessageForTest("job_complete", completion))
 	}
 }
+
+const testModelDigest = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 
 func workerIDFromShard(shardID string) string {
 	switch shardID {

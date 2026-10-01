@@ -26,7 +26,9 @@ The gateway listens on `:8080` by default. Set `LISTEN_ADDR` to override it.
 The server currently supports the Phase-0 Qwen model IDs, both with 36 layers.
 It requires the complete shard partition to be advertised by connected workers. A
 successful response contains the job ID, generated output text when supplied
-by the final worker, generated token IDs, and basic timing metrics.
+by the final worker, generated token IDs, basic timing metrics, participating
+worker IDs, and `execution_mode=distributed_pipeline` when multiple independent
+workers execute the shard plan.
 `max_tokens` defaults to 32 and must be between 1 and 256. Inference requests
 are bounded to 1 MiB.
 
@@ -47,7 +49,7 @@ and TLS belong to M4.
 Messages use a JSON envelope:
 
 ```json
-{"type":"register","payload":{"protocol_version":"phase-0-v2","worker_id":"..."}}
+{"type":"register","payload":{"protocol_version":"phase-0-v3","worker_id":"..."}}
 {"type":"register_ack","payload":{"accepted":true,"worker_id":"...","heartbeat_interval_seconds":15,"state":"UNBENCHMARKED"}}
 {"type":"heartbeat","payload":{"worker_id":"...","state":"UNBENCHMARKED","timestamp":"..."}}
 {"type":"heartbeat_ack","payload":{"worker_id":"...","ack":true}}
@@ -59,12 +61,15 @@ worker must register before sending heartbeats. Disconnecting marks the worker
 offline in the in-memory registry and scheduler.
 
 The server sends a `job_assignment` for every shard in the prefill pass and
-each decode pass. The first prefill shard receives the prompt text; following
+each decode pass. The first Android prefill shard receives the prompt text and
+tokenizes it with the verified GGUF vocabulary; following
 shards receive an activation envelope. On decode, the first shard receives the
 last sampled token ID and following shards receive activation envelopes. The final shard
 must return either a sampled token ID plus an optional text fragment, or EOS.
-Assignments carry a stable sequence ID and increasing token position so
-workers can retain shard-local KV state. After EOS, reaching the token limit,
+Assignments and completions carry a stable sequence ID, pass ordinal, explicit
+KV token offset, and token count so workers can retain shard-local KV state.
+The first completion resolves the prompt's token count for downstream shards
+and decode. After EOS, reaching the token limit,
 or abandoning a failed attempt, the server sends `sequence_end` so workers can
 release that state. Workers reply with
 `job_accepted`, followed by exactly one `job_complete` or `job_failed`
@@ -73,6 +78,6 @@ ID, and worker ID. Activation envelopes carry request/sequence/model identity,
 pass position, source and destination worker, inclusive output layer, tensor
 dtype/shape, Base64 payload, and SHA-256 checksum. Results are routed back to
 the waiting inference request.
-The current Android/iOS clients only implement registration/heartbeats and
-cannot yet execute these assignments; the token loop is currently validated
-with protocol-compatible workers, not real model execution.
+The Android client executes these assignments through the native Qwen2
+layer-range backend. The iOS client currently implements registration and
+heartbeats only.

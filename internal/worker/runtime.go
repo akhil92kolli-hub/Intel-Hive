@@ -42,36 +42,43 @@ type Capabilities struct {
 }
 
 type Job struct {
-	RequestID      string
-	ModelVersion   string
-	WorkerID       string
-	PreviousWorker string
-	NextWorker     string
-	ID             string
-	ModelID        string
-	ShardID        string
-	Layers         model.LayerRange
-	Payload        []byte
-	Activation     *activation.Envelope
-	Phase          string
-	SequenceID     string
-	Position       uint32
-	Prompt         string
-	InputTokenIDs  []uint32
-	FinalShard     bool
-	Sequence       uint64
+	RequestID           string
+	ModelVersion        string
+	ModelArtifactDigest string
+	WorkerID            string
+	PreviousWorker      string
+	NextWorker          string
+	ID                  string
+	ModelID             string
+	ShardID             string
+	Layers              model.LayerRange
+	Payload             []byte
+	Activation          *activation.Envelope
+	Phase               string
+	SequenceID          string
+	Position            uint32
+	PassOrdinal         uint64
+	KVTokenOffset       uint32
+	TokenCount          uint32
+	Prompt              string
+	InputTokenIDs       []uint32
+	FinalShard          bool
+	Sequence            uint64
 }
 
 type JobResult struct {
-	JobID          string
-	Status         string
-	Output         []byte
-	Activation     *activation.Envelope
-	SampledTokenID *uint32
-	EndOfSequence  bool
-	GeneratedText  []byte
-	TokensPerSec   float64
-	LayerCount     int
+	JobID               string
+	Status              string
+	Output              []byte
+	Activation          *activation.Envelope
+	SampledTokenID      *uint32
+	EndOfSequence       bool
+	GeneratedText       []byte
+	TokensPerSec        float64
+	LayerCount          int
+	PassOrdinal         uint64
+	KVTokenOffsetBefore uint32
+	KVTokenOffsetAfter  uint32
 }
 
 // Runtime is the scheduler-facing lifecycle and execution contract. Mock,

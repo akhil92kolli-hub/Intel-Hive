@@ -9,6 +9,7 @@ import (
 
 	"github.com/akhil92kolli-hub/Intel-Hive/internal/model"
 	"github.com/akhil92kolli-hub/Intel-Hive/internal/scheduler"
+	"github.com/akhil92kolli-hub/Intel-Hive/server/internal/protocol"
 	"github.com/google/uuid"
 )
 
@@ -33,6 +34,8 @@ type inferenceResponse struct {
 	GeneratedTokenIDs []uint32 `json:"generated_token_ids"`
 	ExecutionTimeMs   int64    `json:"execution_time_ms"`
 	TokensPerSec      float64  `json:"tokens_per_second"`
+	ExecutionMode     string   `json:"execution_mode"`
+	WorkerIDs         []string `json:"worker_ids"`
 }
 
 func (h *InferenceHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -104,6 +107,7 @@ func (h *InferenceHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		JobID: result.JobID, ModelID: request.ModelID, Output: string(result.Text),
 		GeneratedTokenIDs: result.TokenIDs,
 		ExecutionTimeMs:   result.ExecutionTimeMs, TokensPerSec: result.TokensPerSec,
+		ExecutionMode: planExecutionMode(plan), WorkerIDs: append([]string(nil), plan.WorkerIDs...),
 	}); err != nil {
 		return
 	}
@@ -126,4 +130,15 @@ func supportedModelLayerCount(modelID string) (int, bool) {
 	default:
 		return 0, false
 	}
+}
+
+func planExecutionMode(plan scheduler.AssignmentPlan) string {
+	workers := make(map[string]struct{}, len(plan.WorkerIDs))
+	for _, workerID := range plan.WorkerIDs {
+		workers[workerID] = struct{}{}
+	}
+	if len(workers) > 1 {
+		return protocol.BenchmarkExecutionModeDistributedPipeline
+	}
+	return protocol.BenchmarkExecutionModeSingleDeviceAllShards
 }
