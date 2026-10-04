@@ -3,6 +3,8 @@ package com.intellihive.worker.benchmark
 import com.google.gson.Gson
 import com.google.gson.annotations.SerializedName
 import com.intellihive.worker.inference.ModelShardRange
+import com.intellihive.worker.inference.HYBRID_BENCHMARK_VERSION
+import com.intellihive.worker.inference.ShardPlacementPlan
 import com.intellihive.worker.model.ModelManifest
 import java.io.File
 import java.io.FileOutputStream
@@ -34,6 +36,10 @@ data class BenchmarkReadiness(
     val prefillSpeedTokensPerSecond: Double? = null,
     val generationSpeedTokensPerSecond: Double? = null,
     val layerRanges: List<ModelShardRange> = emptyList(),
+    val benchmarkMode: String? = null,
+    val benchmarkVersion: String? = null,
+    val selectedPlacement: ShardPlacementPlan? = null,
+    val verifiedPlacements: List<ShardPlacementPlan> = emptyList(),
     val completedAt: String? = null,
     val errorMessage: String? = null
 ) {
@@ -49,6 +55,17 @@ data class BenchmarkReadiness(
             "completed benchmark must contain a positive finite tokens_per_second value"
         status == BenchmarkStatus.COMPLETED && layerRanges != com.intellihive.worker.inference.QwenShardCatalog.ranges ->
             "completed benchmark must cover the configured three-shard model topology"
+        status == BenchmarkStatus.COMPLETED && benchmarkMode !in setOf(null, "quick", "full") ->
+            "benchmark mode is invalid"
+        status == BenchmarkStatus.COMPLETED && verifiedPlacements.any { it.validate() != null } ->
+            "verified placement contains invalid data"
+        selectedPlacement != null && selectedPlacement.validate() != null ->
+            "selected placement contains invalid data"
+        selectedPlacement != null && selectedPlacement !in verifiedPlacements ->
+            "selected placement must be included in verified placements"
+        selectedPlacement != null && (benchmarkMode != "full" ||
+            benchmarkVersion != HYBRID_BENCHMARK_VERSION) ->
+            "only a compatible Full benchmark may select a production placement"
         status == BenchmarkStatus.FAILED && errorMessage.isNullOrBlank() ->
             "failed benchmark must contain an error message"
         else -> null
@@ -67,7 +84,11 @@ data class BenchmarkReadiness(
             tokensPerSecond: Double,
             prefillSpeedTokensPerSecond: Double,
             generationSpeedTokensPerSecond: Double,
-            layerRanges: List<ModelShardRange>
+            layerRanges: List<ModelShardRange>,
+            benchmarkMode: String? = null,
+            benchmarkVersion: String? = null,
+            selectedPlacement: ShardPlacementPlan? = null,
+            verifiedPlacements: List<ShardPlacementPlan> = emptyList()
         ) = BenchmarkReadiness(
             status = BenchmarkStatus.COMPLETED,
             executionMode = BenchmarkExecutionMode.SINGLE_DEVICE_ALL_SHARDS,
@@ -78,6 +99,10 @@ data class BenchmarkReadiness(
             prefillSpeedTokensPerSecond = prefillSpeedTokensPerSecond,
             generationSpeedTokensPerSecond = generationSpeedTokensPerSecond,
             layerRanges = layerRanges,
+            benchmarkMode = benchmarkMode,
+            benchmarkVersion = benchmarkVersion,
+            selectedPlacement = selectedPlacement,
+            verifiedPlacements = verifiedPlacements,
             completedAt = Instant.now().toString()
         )
 
@@ -100,11 +125,17 @@ class BenchmarkReadinessStore(private val resultFile: File) {
         } catch (error: Exception) {
             throw IllegalStateException("Could not read persisted benchmark result: ${error.message}", error)
         }
-        val migrated = if (record.status == BenchmarkStatus.COMPLETED && record.executionMode == null) {
-            record.copy(executionMode = BenchmarkExecutionMode.SINGLE_DEVICE_ALL_SHARDS)
-        } else {
-            record
-        }
+        val migrated = record.copy(
+            executionMode = if (record.status == BenchmarkStatus.COMPLETED &&
+                record.executionMode == null
+            ) {
+                BenchmarkExecutionMode.SINGLE_DEVICE_ALL_SHARDS
+            } else {
+                record.executionMode
+            },
+            layerRanges = record.layerRanges.orEmpty(),
+            verifiedPlacements = record.verifiedPlacements.orEmpty()
+        )
         migrated.validate()?.let { throw IllegalStateException("Invalid persisted benchmark result: $it") }
         if (migrated != record) write(migrated)
         return migrated

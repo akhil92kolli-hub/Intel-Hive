@@ -1,6 +1,8 @@
 package com.intellihive.worker.inference
 
 import android.content.Context
+import com.google.gson.Gson
+import com.google.gson.reflect.TypeToken
 import java.io.File
 import java.io.FileInputStream
 import java.security.MessageDigest
@@ -11,28 +13,52 @@ import kotlinx.coroutines.withContext
 import com.intellihive.worker.model.ModelManifest
 import com.intellihive.worker.model.RequiredModelManager
 
+enum class InferenceBackend {
+    CPU,
+    VULKAN
+}
+
 internal class NativeLayerRangeBindings {
     fun nativeLoadModel(modelPath: String): Long = NativeBridge.nativeLoadModel(modelPath)
     fun nativeLayerCount(modelHandle: Long): Int = NativeBridge.nativeLayerCount(modelHandle)
     fun nativeEmbeddingSize(modelHandle: Long): Int = NativeBridge.nativeEmbeddingSize(modelHandle)
     fun nativeTokenize(modelHandle: Long, prompt: String): LongArray =
         NativeBridge.nativeTokenize(modelHandle, prompt.toByteArray(Charsets.UTF_8))
-    fun nativeCreateShard(modelHandle: Long, firstLayer: Int, lastLayer: Int): Long =
-        NativeBridge.nativeCreateShard(modelHandle, firstLayer, lastLayer)
+    fun nativeCreateShard(
+        modelHandle: Long,
+        firstLayer: Int,
+        lastLayer: Int,
+        graphThreads: Int,
+        useVulkan: Boolean
+    ): Long = NativeBridge.nativeCreateShard(
+        modelHandle,
+        firstLayer,
+        lastLayer,
+        graphThreads,
+        useVulkan
+    )
+    fun nativeLayerWeightBytes(modelHandle: Long, firstLayer: Int, lastLayer: Int): Long =
+        NativeBridge.nativeLayerWeightBytes(modelHandle, firstLayer, lastLayer)
+    fun nativeShardUsedVulkan(shardHandle: Long): Boolean =
+        NativeBridge.nativeShardUsedVulkan(shardHandle)
+    fun nativeShardBackendStats(shardHandle: Long): String =
+        NativeBridge.nativeShardBackendStats(shardHandle)
     fun nativeExecute(
         shardHandle: Long,
         sequenceId: String,
         tokenOffset: Int,
         tokenCount: Int,
         tokenIds: LongArray?,
-        activation: ByteArray?
+        activation: ByteArray?,
+        maxDurationMs: Long
     ): ByteArray = NativeBridge.nativeExecute(
         shardHandle,
         sequenceId,
         tokenOffset,
         tokenCount,
         tokenIds,
-        activation
+        activation,
+        maxDurationMs
     )
     fun nativeEndSequence(shardHandle: Long, sequenceId: String) =
         NativeBridge.nativeEndSequence(shardHandle, sequenceId)
@@ -47,12 +73,110 @@ internal class NativeLayerRangeBindings {
  */
 class NativeLayerRangeShardExecutor(
     context: Context,
-    private val modelFile: File = RequiredModelManager.defaultModelFile(context)
-) : NativeShardExecutor, NativePromptTokenizer, AutoCloseable {
+    private val modelFile: File = RequiredModelManager.defaultModelFile(context),
+    graphThreads: Int = 0
+) : NativeShardExecutor, NativePromptTokenizer, NativeExecutionDeadlineController, AutoCloseable {
     private val bindings = NativeLayerRangeBindings()
+    private val gson = Gson()
     private val lock = Any()
     private val modelHandles = mutableMapOf<ModelKey, LoadedModel>()
     private val shardHandles = mutableMapOf<ShardKey, Long>()
+    @Volatile
+    private var graphThreads = graphThreads
+    @Volatile
+    private var backend = InferenceBackend.CPU
+    @Volatile
+    private var gpuLayers = 0
+    @Volatile
+    private var vulkanShardOverrides: Set<String>? = null
+    @Volatile
+    private var executionDeadlineNanos: Long? = null
+
+    init {
+        require(graphThreads in 0..8) { "graphThreads must be between 0 and 8" }
+    }
+
+    fun configureGraphThreads(threads: Int) {
+        require(threads in 0..8) { "graphThreads must be between 0 and 8" }
+        synchronized(lock) {
+            if (graphThreads != threads) clearShardHandles()
+            graphThreads = threads
+        }
+    }
+
+    fun configureBackend(backend: InferenceBackend, gpuLayers: Int = 0) {
+        require(gpuLayers in setOf(0, 10, 20, MODEL_LAYER_COUNT)) {
+            "GPU offload must end at a supported shard boundary: 0, 10, 20, or $MODEL_LAYER_COUNT layers"
+        }
+        require((backend == InferenceBackend.CPU) == (gpuLayers == 0)) {
+            "CPU execution requires 0 GPU layers and Vulkan execution requires at least 1 GPU layer"
+        }
+        synchronized(lock) {
+            if (this.backend != backend || this.gpuLayers != gpuLayers ||
+                vulkanShardOverrides != null
+            ) clearShardHandles()
+            this.backend = backend
+            this.gpuLayers = gpuLayers
+            vulkanShardOverrides = null
+        }
+    }
+
+    fun configureShardBackends(vulkanShardIds: Set<String>) {
+        val knownShardIds = QwenShardCatalog.ranges.map { it.shardId }.toSet()
+        require(vulkanShardIds.all { it in knownShardIds }) {
+            "Unknown Vulkan shard ID in backend profile"
+        }
+        synchronized(lock) {
+            if (vulkanShardOverrides != vulkanShardIds) clearShardHandles()
+            backend = if (vulkanShardIds.isEmpty()) InferenceBackend.CPU else InferenceBackend.VULKAN
+            gpuLayers = 0
+            vulkanShardOverrides = vulkanShardIds.toSet()
+        }
+    }
+
+    override fun setExecutionDeadlineNanos(deadlineNanos: Long?) {
+        require(deadlineNanos == null || deadlineNanos > 0L) {
+            "execution deadline must be a positive monotonic timestamp"
+        }
+        executionDeadlineNanos = deadlineNanos
+    }
+
+    suspend fun layerWeightBytes(firstLayer: Int, lastLayer: Int): Long =
+        withContext(Dispatchers.IO) {
+            synchronized(lock) {
+                val model = loadedModel()
+                require(firstLayer >= 0 && lastLayer >= firstLayer && lastLayer < model.layerCount) {
+                    "requested layer range $firstLayer-$lastLayer is invalid for this model"
+                }
+                bindings.nativeLayerWeightBytes(model.handle, firstLayer, lastLayer)
+            }
+        }
+
+    fun didUseVulkan(): Boolean = synchronized(lock) {
+        shardHandles.values.any(bindings::nativeShardUsedVulkan)
+    }
+
+    fun usedVulkanShardIds(): Set<String> = synchronized(lock) {
+        shardHandles.filterValues(bindings::nativeShardUsedVulkan).keys.mapNotNull { key ->
+            QwenShardCatalog.ranges.firstOrNull {
+                it.layerStart == key.firstLayer && it.layerEnd == key.lastLayer
+            }?.shardId
+        }.toSet()
+    }
+
+    fun backendStatistics(): Map<String, Map<String, Any?>> = synchronized(lock) {
+        val type = object : TypeToken<Map<String, Any?>>() {}.type
+        shardHandles.mapNotNull { (key, handle) ->
+            val shardId = QwenShardCatalog.ranges.firstOrNull {
+                it.layerStart == key.firstLayer && it.layerEnd == key.lastLayer
+            }?.shardId ?: return@mapNotNull null
+            val parsed = gson.fromJson<Map<String, Any?>>(
+                bindings.nativeShardBackendStats(handle),
+                type
+            ) ?: emptyMap()
+            shardId to parsed
+        }.toMap()
+    }
 
     suspend fun prepareModel(): Unit = withContext(Dispatchers.IO) {
         synchronized(lock) {
@@ -135,7 +259,8 @@ class NativeLayerRangeShardExecutor(
                     Math.toIntExact(request.kvTokenOffset),
                     tokenCount,
                     tokenIds,
-                    activation
+                    activation,
+                    remainingExecutionTimeMs()
                 )
                 require(nativeResult.isNotEmpty()) { "Native shard returned an empty result envelope" }
 
@@ -198,11 +323,19 @@ class NativeLayerRangeShardExecutor(
 
     override fun close() {
         synchronized(lock) {
-            shardHandles.values.forEach(bindings::nativeDestroyShard)
-            shardHandles.clear()
+            executionDeadlineNanos = null
+            clearShardHandles()
             modelHandles.values.forEach { bindings.nativeUnloadModel(it.handle) }
             modelHandles.clear()
         }
+    }
+
+    private fun remainingExecutionTimeMs(): Long {
+        val deadline = executionDeadlineNanos ?: return 0L
+        val remainingNanos = deadline - System.nanoTime()
+        check(remainingNanos > 0L) { "Native execution deadline exceeded" }
+        return ((remainingNanos + NANOS_PER_MILLISECOND - 1L) / NANOS_PER_MILLISECOND)
+            .coerceAtLeast(1L)
     }
 
     private fun validateRequest(request: ShardExecutionRequest) {
@@ -272,15 +405,29 @@ class NativeLayerRangeShardExecutor(
 
     private fun shardHandle(model: LoadedModel, range: ModelShardRange): Long {
         val key = ModelKey(MODEL_ID, MODEL_VERSION, ModelManifest.PINNED_ARTIFACT_DIGEST)
-        val shardKey = ShardKey(key, range.layerStart, range.layerEnd)
+        val useVulkan = vulkanShardOverrides?.let { selectedShardIds ->
+            QwenShardCatalog.ranges.any {
+                it.shardId in selectedShardIds &&
+                    it.layerStart == range.layerStart &&
+                    it.layerEnd == range.layerEnd
+            }
+        } ?: (backend == InferenceBackend.VULKAN && range.layerStart < gpuLayers)
+        val shardKey = ShardKey(key, range.layerStart, range.layerEnd, graphThreads, useVulkan)
         return shardHandles[shardKey] ?: bindings.nativeCreateShard(
             model.handle,
             range.layerStart,
-            range.layerEnd
+            range.layerEnd,
+            graphThreads,
+            useVulkan
         ).also { handle ->
             check(handle > 0L) { "Native shard creation returned an invalid handle" }
             shardHandles[shardKey] = handle
         }
+    }
+
+    private fun clearShardHandles() {
+        shardHandles.values.forEach(bindings::nativeDestroyShard)
+        shardHandles.clear()
     }
 
     private fun sha256(file: File): String {
@@ -304,7 +451,13 @@ class NativeLayerRangeShardExecutor(
     }
 
     private data class ModelKey(val modelId: String, val version: String, val digest: String)
-    private data class ShardKey(val model: ModelKey, val firstLayer: Int, val lastLayer: Int)
+    private data class ShardKey(
+        val model: ModelKey,
+        val firstLayer: Int,
+        val lastLayer: Int,
+        val graphThreads: Int,
+        val useVulkan: Boolean
+    )
     private data class LoadedModel(val handle: Long, val layerCount: Int, val embeddingSize: Int)
 
     companion object {
@@ -314,6 +467,7 @@ class NativeLayerRangeShardExecutor(
         private const val MODEL_LAYER_COUNT = 36
         private const val MODEL_HIDDEN_SIZE = 2048
         private const val MODEL_VERSION = ModelManifest.PINNED_MODEL_VERSION
+        private const val NANOS_PER_MILLISECOND = 1_000_000L
         private val SUPPORTED_MODEL_IDS = setOf("qwen2.5-3b", "qwen2.5-3b-instruct")
         private val SUPPORTED_MODEL_VERSIONS = setOf("1", "v1", MODEL_VERSION)
     }

@@ -8,6 +8,11 @@
 
 namespace intelhive {
 
+enum class InferenceBackend {
+    Cpu,
+    Vulkan,
+};
+
 struct Qwen2Config {
     int32_t layer_count;
     int32_t embedding_size;
@@ -20,21 +25,43 @@ struct Qwen2Config {
     float rope_frequency_base;
 };
 
+struct BackendExecutionStats {
+    InferenceBackend requested_backend = InferenceBackend::Cpu;
+    uint64_t cpu_graph_nodes = 0;
+    uint64_t vulkan_graph_nodes = 0;
+    uint64_t gpu_weight_bytes = 0;
+    uint64_t gpu_kv_bytes = 0;
+    uint64_t host_kv_bytes = 0;
+    uint64_t activation_transfer_bytes = 0;
+    bool fallback_used = false;
+};
+
 class Qwen2GgufModel;
 
 class Qwen2GgufShard {
 public:
-    Qwen2GgufShard(std::shared_ptr<const Qwen2GgufModel> model, int32_t first_layer, int32_t last_layer);
+    Qwen2GgufShard(
+        std::shared_ptr<const Qwen2GgufModel> model,
+        int32_t first_layer,
+        int32_t last_layer,
+        int32_t graph_threads = 0,
+        InferenceBackend backend = InferenceBackend::Cpu,
+        int64_t max_duration_ms = 0);
     ~Qwen2GgufShard();
     Qwen2GgufShard(Qwen2GgufShard&&) noexcept;
     Qwen2GgufShard& operator=(Qwen2GgufShard&&) noexcept;
     Qwen2GgufShard(const Qwen2GgufShard&) = delete;
     Qwen2GgufShard& operator=(const Qwen2GgufShard&) = delete;
 
-    std::vector<float> execute(const std::vector<float>& token_major_input, int32_t token_offset);
+    std::vector<float> execute(
+        const std::vector<float>& token_major_input,
+        int32_t token_offset,
+        int64_t max_duration_ms = 0);
     void reset();
     int32_t cached_tokens() const;
     size_t mapped_weight_bytes() const;
+    bool used_vulkan() const;
+    BackendExecutionStats backend_stats() const;
     int32_t first_layer() const;
     int32_t last_layer() const;
 
@@ -55,7 +82,10 @@ public:
     const Qwen2Config& config() const;
     std::vector<int32_t> tokenize(const std::string& text) const;
     std::vector<float> embed_token(uint32_t token_id) const;
-    std::vector<float> project_logits(const std::vector<float>& hidden_state) const;
+    std::vector<float> project_logits(
+        const std::vector<float>& hidden_state,
+        int32_t graph_threads = 0) const;
+    size_t layer_weight_bytes(int32_t first_layer, int32_t last_layer) const;
     const std::string& path() const;
 
 private:

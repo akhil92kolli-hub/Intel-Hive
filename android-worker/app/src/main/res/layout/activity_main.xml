@@ -1,15 +1,20 @@
 <?xml version="1.0" encoding="utf-8"?>
-<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:orientation="vertical"
-    android:padding="16dp">
+    android:fillViewport="true">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:padding="16dp">
 
     <TextView
         android:id="@+id/title"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:text="Intel-Hive Worker"
+        android:text="IntelHive Benchmark / Worker"
         android:textSize="24sp"
         android:textStyle="bold"
         android:layout_marginBottom="16dp" />
@@ -98,8 +103,15 @@
         android:id="@+id/benchmark_button"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:text="Start Benchmark"
-        android:layout_marginBottom="16dp" />
+        android:text="Run device characterization"
+        android:layout_marginBottom="8dp" />
+
+    <Button
+        android:id="@+id/benchmark_reset_button"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="Reset benchmark"
+        android:layout_marginBottom="8dp" />
 
     <ProgressBar
         android:id="@+id/progress_bar"
@@ -108,17 +120,28 @@
         android:layout_height="wrap_content"
         android:layout_marginBottom="16dp" />
 
-    <ScrollView
+    <TextView
+        android:id="@+id/benchmark_plan_summary"
         android:layout_width="match_parent"
-        android:layout_height="0dp"
-        android:layout_weight="1">
-        <TextView
-            android:id="@+id/metrics_text"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:text="Awaiting benchmark results..."
-            android:textSize="12sp"
-            android:fontFamily="monospace" />
-    </ScrollView>
+        android:layout_height="wrap_content"
+        android:text="Quick runs 32 tokens; Full runs 32, 64, and 128 tokens for upstream llama.cpp CPU baseline, IntelHive CPU-only, Vulkan-only, and hybrid shards. Tests use 4 CPU threads for direct comparison, record requested/observed GPU layers, and skip unsupported or memory-constrained configurations with a reason."
+        android:textSize="12sp"
+        android:layout_marginBottom="8dp" />
 
-</LinearLayout>
+    <LinearLayout
+        android:id="@+id/benchmark_steps"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical" />
+
+    <TextView
+        android:id="@+id/metrics_text"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="Awaiting benchmark results..."
+        android:textSize="12sp"
+        android:fontFamily="monospace"
+        android:layout_marginTop="12dp" />
+
+    </LinearLayout>
+</ScrollView>

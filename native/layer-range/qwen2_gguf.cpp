@@ -4,15 +4,22 @@
 #include "ggml.h"
 #include "gguf.h"
 #include "llama.h"
+#include "ggml-backend.h"
+#ifdef INTELHIVE_HAS_VULKAN
+#include "ggml-vulkan.h"
+#endif
 
 #include <algorithm>
+#include <chrono>
 #include <cerrno>
 #include <cmath>
 #include <cstring>
 #include <fcntl.h>
+#include <functional>
 #include <memory>
 #include <limits>
 #include <mutex>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -26,6 +33,42 @@ namespace intelhive {
 namespace {
 
 using GgmlContext = std::unique_ptr<ggml_context, decltype(&ggml_free)>;
+using BackendHandle = std::unique_ptr<ggml_backend, decltype(&ggml_backend_free)>;
+using BackendBuffer = std::unique_ptr<ggml_backend_buffer, decltype(&ggml_backend_buffer_free)>;
+using BackendScheduler = std::unique_ptr<ggml_backend_sched, decltype(&ggml_backend_sched_free)>;
+using ExecutionDeadline = std::optional<std::chrono::steady_clock::time_point>;
+
+ExecutionDeadline execution_deadline(int64_t max_duration_ms) {
+    if (max_duration_ms <= 0) return std::nullopt;
+    return std::chrono::steady_clock::now() + std::chrono::milliseconds(max_duration_ms);
+}
+
+bool deadline_expired(const ExecutionDeadline& deadline) {
+    return deadline.has_value() && std::chrono::steady_clock::now() >= *deadline;
+}
+
+void require_before_deadline(const ExecutionDeadline& deadline) {
+    if (deadline_expired(deadline)) {
+        throw std::runtime_error("Native execution deadline exceeded");
+    }
+}
+
+struct SchedulerDeadlineState {
+    ExecutionDeadline deadline;
+    size_t nodes_asked = 0;
+    bool expired = false;
+};
+
+bool scheduler_deadline_callback(ggml_tensor*, bool ask, void* user_data) {
+    auto& state = *static_cast<SchedulerDeadlineState*>(user_data);
+    if (ask) {
+        ++state.nodes_asked;
+        state.expired = deadline_expired(state.deadline);
+        return state.expired || state.nodes_asked % 32 == 0;
+    }
+    state.expired = deadline_expired(state.deadline);
+    return !state.expired;
+}
 
 GgmlContext create_context(size_t bytes, bool no_alloc = false) {
     auto* context = ggml_init({bytes, nullptr, no_alloc});
@@ -33,18 +76,179 @@ GgmlContext create_context(size_t bytes, bool no_alloc = false) {
     return GgmlContext(context, ggml_free);
 }
 
-int graph_thread_count() {
+int graph_thread_count(int requested) {
+    if (requested > 0) return requested;
     const unsigned int available = std::thread::hardware_concurrency();
     return static_cast<int>(std::max(1U, std::min(available == 0 ? 1U : available, 8U)));
 }
 
-void run_graph(ggml_context* context, ggml_tensor* output) {
+void run_graph(ggml_context* context, ggml_tensor* output, int graph_threads = 0) {
     auto* graph = ggml_new_graph(context);
     ggml_build_forward_expand(graph, output);
-    if (ggml_graph_compute_with_ctx(context, graph, graph_thread_count()) != GGML_STATUS_SUCCESS) {
+    if (ggml_graph_compute_with_ctx(context, graph, graph_thread_count(graph_threads)) != GGML_STATUS_SUCCESS) {
         throw std::runtime_error("ggml graph execution failed");
     }
 }
+
+class GraphExecutor {
+public:
+    GraphExecutor(InferenceBackend kind, int32_t graph_threads) : kind_(kind), graph_threads_(graph_threads) {
+        if (kind_ == InferenceBackend::Cpu) return;
+#ifdef INTELHIVE_HAS_VULKAN
+        if (ggml_backend_vk_get_device_count() <= 0) {
+            throw std::runtime_error("GGML Vulkan backend found no usable Vulkan device");
+        }
+        vulkan_.reset(ggml_backend_vk_init(0));
+        cpu_.reset(ggml_backend_cpu_init());
+        if (!vulkan_ || !cpu_) {
+            throw std::runtime_error("could not initialize GGML Vulkan and CPU backends");
+        }
+        ggml_backend_cpu_set_n_threads(cpu_.get(), graph_thread_count(graph_threads_));
+        ggml_backend_t backends[] = {vulkan_.get(), cpu_.get()};
+        scheduler_.reset(ggml_backend_sched_new(
+            backends, nullptr, 2, GGML_DEFAULT_GRAPH_SIZE, false, true));
+        if (!scheduler_) throw std::runtime_error("could not create GGML Vulkan backend scheduler");
+#else
+        (void) graph_threads_;
+        throw std::runtime_error("This build does not include the GGML Vulkan backend");
+#endif
+    }
+
+    void allocate_weights(
+            ggml_context* context,
+            const std::function<const void*(const ggml_tensor*)>& resolve_source,
+            const ExecutionDeadline& deadline) {
+#ifdef INTELHIVE_HAS_VULKAN
+        if (kind_ != InferenceBackend::Vulkan) return;
+        require_before_deadline(deadline);
+        BackendBuffer buffer(ggml_backend_alloc_ctx_tensors(context, vulkan_.get()),
+            ggml_backend_buffer_free);
+        if (!buffer) throw std::runtime_error("could not allocate Vulkan shard weight buffer");
+        ggml_backend_buffer_set_usage(buffer.get(), GGML_BACKEND_BUFFER_USAGE_WEIGHTS);
+        for (auto* tensor = ggml_get_first_tensor(context); tensor != nullptr;
+                tensor = ggml_get_next_tensor(context, tensor)) {
+            require_before_deadline(deadline);
+            const auto* source = resolve_source(tensor);
+            if (source == nullptr) throw std::runtime_error("could not resolve mapped GGUF tensor data");
+            ggml_backend_tensor_set(tensor, source, 0, ggml_nbytes(tensor));
+        }
+        require_before_deadline(deadline);
+        weight_buffer_ = std::move(buffer);
+        gpu_weight_bytes_ = ggml_backend_buffer_get_size(weight_buffer_.get());
+#else
+        (void) context;
+        (void) resolve_source;
+#endif
+    }
+
+    void compute(
+            ggml_context* context,
+            ggml_tensor* output,
+            const ExecutionDeadline& deadline) {
+        require_before_deadline(deadline);
+        auto* graph = ggml_new_graph(context);
+        ggml_build_forward_expand(graph, output);
+        if (kind_ == InferenceBackend::Cpu) {
+            cpu_graph_nodes_ += static_cast<uint64_t>(ggml_graph_n_nodes(graph));
+            if (ggml_graph_compute_with_ctx(
+                    context, graph, graph_thread_count(graph_threads_)) != GGML_STATUS_SUCCESS) {
+                throw std::runtime_error("ggml graph execution failed");
+            }
+            require_before_deadline(deadline);
+            return;
+        }
+#ifdef INTELHIVE_HAS_VULKAN
+        ggml_backend_sched_reset(scheduler_.get());
+        ggml_backend_sched_split_graph(scheduler_.get(), graph);
+        bool graph_uses_vulkan = false;
+        const int node_count = ggml_graph_n_nodes(graph);
+        for (int index = 0; index < node_count; ++index) {
+            const bool vulkan_node = ggml_backend_is_vk(ggml_backend_sched_get_tensor_backend(
+                scheduler_.get(), ggml_graph_node(graph, index)));
+            graph_uses_vulkan = graph_uses_vulkan || vulkan_node;
+            if (vulkan_node) ++vulkan_graph_nodes_;
+            else ++cpu_graph_nodes_;
+        }
+        if (!graph_uses_vulkan) {
+            ggml_backend_sched_reset(scheduler_.get());
+            throw std::runtime_error("GGML scheduled this graph entirely on CPU; no Vulkan inference was measured");
+        }
+        SchedulerDeadlineState deadline_state {deadline};
+        if (deadline.has_value()) {
+            ggml_backend_sched_set_eval_callback(
+                scheduler_.get(), scheduler_deadline_callback, &deadline_state);
+        }
+        const auto status = ggml_backend_sched_graph_compute(scheduler_.get(), graph);
+        if (deadline.has_value()) {
+            ggml_backend_sched_set_eval_callback(scheduler_.get(), nullptr, nullptr);
+        }
+        if (deadline_state.expired) {
+            ggml_backend_sched_reset(scheduler_.get());
+            throw std::runtime_error("Native execution deadline exceeded");
+        }
+        if (status != GGML_STATUS_SUCCESS) {
+            ggml_backend_sched_reset(scheduler_.get());
+            throw std::runtime_error("GGML Vulkan graph execution failed");
+        }
+        used_vulkan_ = true;
+        graph_pending_ = true;
+#endif
+    }
+
+    std::vector<float> read_f32(
+            const ggml_tensor* tensor,
+            const ExecutionDeadline& deadline) {
+        require_before_deadline(deadline);
+        std::vector<float> values(static_cast<size_t>(ggml_nelements(tensor)));
+#ifdef INTELHIVE_HAS_VULKAN
+        if (kind_ == InferenceBackend::Vulkan) {
+            activation_transfer_bytes_ += static_cast<uint64_t>(values.size() * sizeof(float));
+            ggml_backend_tensor_get(tensor, values.data(), 0, values.size() * sizeof(float));
+            require_before_deadline(deadline);
+            return values;
+        }
+#endif
+        const auto* data = static_cast<const float*>(tensor->data);
+        return {data, data + values.size()};
+    }
+
+    void finish() {
+#ifdef INTELHIVE_HAS_VULKAN
+        if (kind_ == InferenceBackend::Vulkan && graph_pending_) {
+            ggml_backend_sched_synchronize(scheduler_.get());
+            ggml_backend_sched_reset(scheduler_.get());
+            graph_pending_ = false;
+        }
+#endif
+    }
+
+    bool used_vulkan() const { return used_vulkan_; }
+
+    BackendExecutionStats stats() const {
+        BackendExecutionStats value;
+        value.requested_backend = kind_;
+        value.cpu_graph_nodes = cpu_graph_nodes_;
+        value.vulkan_graph_nodes = vulkan_graph_nodes_;
+        value.gpu_weight_bytes = gpu_weight_bytes_;
+        value.activation_transfer_bytes = activation_transfer_bytes_;
+        value.fallback_used = kind_ == InferenceBackend::Vulkan && cpu_graph_nodes_ > 0;
+        return value;
+    }
+
+private:
+    InferenceBackend kind_;
+    int32_t graph_threads_;
+    bool used_vulkan_ = false;
+    bool graph_pending_ = false;
+    uint64_t cpu_graph_nodes_ = 0;
+    uint64_t vulkan_graph_nodes_ = 0;
+    uint64_t gpu_weight_bytes_ = 0;
+    uint64_t activation_transfer_bytes_ = 0;
+    BackendHandle vulkan_ {nullptr, ggml_backend_free};
+    BackendHandle cpu_ {nullptr, ggml_backend_free};
+    BackendScheduler scheduler_ {nullptr, ggml_backend_sched_free};
+    BackendBuffer weight_buffer_ {nullptr, ggml_backend_buffer_free};
+};
 
 uint32_t read_u32(const gguf_context* metadata, const std::string& key) {
     const int64_t id = gguf_find_key(metadata, key.c_str());
@@ -178,13 +382,14 @@ struct Qwen2GgufModel::Impl {
             ggml_context* context,
             const std::string& name,
             int64_t dim0,
-            int64_t dim1) const {
+            int64_t dim1,
+            bool backend_owned = false) const {
         const TensorDescriptor descriptor = tensor_descriptor(name, dim0, dim1);
         auto* tensor = ggml_new_tensor_2d(context, descriptor.type, dim0, dim1);
         if (ggml_nbytes(tensor) != descriptor.bytes) {
             throw std::runtime_error("GGUF tensor byte size mismatch: " + name);
         }
-        tensor->data = const_cast<uint8_t*>(mapped_data + descriptor.offset);
+        if (!backend_owned) tensor->data = const_cast<uint8_t*>(mapped_data + descriptor.offset);
         ggml_set_name(tensor, name.c_str());
         return tensor;
     }
@@ -192,7 +397,8 @@ struct Qwen2GgufModel::Impl {
     ggml_tensor* map_optional_vector(
             ggml_context* context,
             const std::string& name,
-            int64_t length) const {
+            int64_t length,
+            bool backend_owned = false) const {
         const int64_t id = gguf_find_tensor(metadata, name.c_str());
         if (id < 0) return nullptr;
 
@@ -213,9 +419,18 @@ struct Qwen2GgufModel::Impl {
         if (ggml_nbytes(tensor) != bytes) {
             throw std::runtime_error("GGUF tensor byte size mismatch: " + name);
         }
-        tensor->data = const_cast<uint8_t*>(mapped_data + data_offset + tensor_offset);
+        if (!backend_owned) {
+            tensor->data = const_cast<uint8_t*>(mapped_data + data_offset + tensor_offset);
+        }
         ggml_set_name(tensor, name.c_str());
         return tensor;
+    }
+
+    const void* mapped_tensor_data(const ggml_tensor* tensor) const {
+        const int64_t id = gguf_find_tensor(metadata, ggml_get_name(tensor));
+        if (id < 0) return nullptr;
+        return mapped_data + gguf_get_data_offset(metadata) +
+            gguf_get_tensor_offset(metadata, id);
     }
 
     std::string model_path;
@@ -249,26 +464,22 @@ struct Qwen2GgufShard::Impl {
         std::vector<float> values;
     };
 
-    struct LayerResult {
-        std::vector<float> activation;
-        std::vector<float> rotated_key;
-        std::vector<float> value;
+    struct LayerGraphResult {
+        ggml_tensor* activation;
+        ggml_tensor* rotated_key;
+        ggml_tensor* value;
     };
 
-    LayerResult execute_layer(
+    LayerGraphResult build_layer(
+            ggml_context* ctx,
             const LayerWeights& weights,
             const LayerCache& cache,
-            const std::vector<float>& input,
+            ggml_tensor* residual_input,
             int32_t position,
             const Qwen2Config& config) const {
         const int32_t head_dimension = config.embedding_size / config.attention_heads;
         const int32_t previous_tokens = static_cast<int32_t>(
             cache.keys.size() / static_cast<size_t>(head_dimension * config.kv_heads));
-
-        auto context = create_context(32 * 1024 * 1024);
-        auto* ctx = context.get();
-        auto* residual_input = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, config.embedding_size);
-        std::memcpy(residual_input->data, input.data(), input.size() * sizeof(float));
 
         auto* positions = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, 1);
         static_cast<int32_t*>(positions->data)[0] = position;
@@ -355,23 +566,20 @@ struct Qwen2GgufShard::Impl {
         auto* down = ggml_mul_mat(ctx, weights.feed_forward_down, ggml_mul(ctx, gate, up));
         auto* output = ggml_add(ctx, attention_residual, down);
 
-        run_graph(ctx, output);
-        const auto* output_data = static_cast<const float*>(output->data);
-        const auto* key_data = static_cast<const float*>(key->data);
-        const auto* value_data = static_cast<const float*>(value->data);
-        return {
-            {output_data, output_data + config.embedding_size},
-            {key_data, key_data + head_dimension * config.kv_heads},
-            {value_data, value_data + head_dimension * config.kv_heads},
-        };
+        return {output, key, value};
     }
+
+    Impl(InferenceBackend backend, int32_t graph_threads)
+        : graph_executor(backend, graph_threads) {}
 
     std::shared_ptr<const Qwen2GgufModel> model;
     GgmlContext weights_context {nullptr, ggml_free};
+    GraphExecutor graph_executor;
     std::vector<LayerWeights> weights;
     std::vector<LayerCache> cache;
     int32_t first = 0;
     int32_t last = -1;
+    int32_t graph_threads = 0;
     int32_t token_count = 0;
     size_t weight_bytes = 0;
 };
@@ -383,6 +591,34 @@ Qwen2GgufModel& Qwen2GgufModel::operator=(Qwen2GgufModel&&) noexcept = default;
 
 const Qwen2Config& Qwen2GgufModel::config() const {
     return impl_->config;
+}
+
+size_t Qwen2GgufModel::layer_weight_bytes(int32_t first_layer, int32_t last_layer) const {
+    if (first_layer < 0 || last_layer < first_layer || last_layer >= impl_->config.layer_count) {
+        throw std::invalid_argument("invalid inclusive Qwen2 layer range");
+    }
+    static const char* const required_names[] = {
+        "attn_norm.weight", "attn_q.weight", "attn_k.weight", "attn_v.weight",
+        "attn_output.weight", "ffn_norm.weight", "ffn_gate.weight", "ffn_up.weight",
+        "ffn_down.weight",
+    };
+    static const char* const optional_names[] = {
+        "attn_q.bias", "attn_k.bias", "attn_v.bias",
+    };
+    size_t total = 0;
+    for (int32_t layer = first_layer; layer <= last_layer; ++layer) {
+        const std::string prefix = "blk." + std::to_string(layer) + ".";
+        for (const char* suffix : required_names) {
+            const int64_t id = gguf_find_tensor(impl_->metadata, (prefix + suffix).c_str());
+            if (id < 0) throw std::runtime_error("required GGUF layer tensor missing: " + prefix + suffix);
+            total += gguf_get_tensor_size(impl_->metadata, id);
+        }
+        for (const char* suffix : optional_names) {
+            const int64_t id = gguf_find_tensor(impl_->metadata, (prefix + suffix).c_str());
+            if (id >= 0) total += gguf_get_tensor_size(impl_->metadata, id);
+        }
+    }
+    return total;
 }
 
 const std::string& Qwen2GgufModel::path() const {
@@ -426,7 +662,12 @@ std::vector<float> Qwen2GgufModel::embed_token(uint32_t token_id) const {
     return {data, data + impl_->config.embedding_size};
 }
 
-std::vector<float> Qwen2GgufModel::project_logits(const std::vector<float>& hidden_state) const {
+std::vector<float> Qwen2GgufModel::project_logits(
+        const std::vector<float>& hidden_state,
+        int32_t graph_threads) const {
+    if (graph_threads < 0 || graph_threads > 8) {
+        throw std::invalid_argument("Qwen2 graph thread count must be between 0 and 8");
+    }
     const auto& config = impl_->config;
     if (hidden_state.size() != static_cast<size_t>(config.embedding_size)) {
         throw std::invalid_argument("final hidden state does not match Qwen2 embedding size");
@@ -454,7 +695,7 @@ std::vector<float> Qwen2GgufModel::project_logits(const std::vector<float>& hidd
         auto* output_bias = impl_->map_tensor(weight_context.get(), "output.bias", config.vocabulary_size, 1);
         logits = ggml_add(graph_context.get(), logits, output_bias);
     }
-    run_graph(graph_context.get(), logits);
+    run_graph(graph_context.get(), logits, graph_threads);
     const auto* data = static_cast<const float*>(logits->data);
     return {data, data + config.vocabulary_size};
 }
@@ -462,7 +703,12 @@ std::vector<float> Qwen2GgufModel::project_logits(const std::vector<float>& hidd
 Qwen2GgufShard::Qwen2GgufShard(
         std::shared_ptr<const Qwen2GgufModel> model,
         int32_t first_layer,
-        int32_t last_layer) : impl_(std::make_unique<Impl>()) {
+        int32_t last_layer,
+        int32_t graph_threads,
+        InferenceBackend backend,
+        int64_t max_duration_ms) : impl_(std::make_unique<Impl>(backend, graph_threads)) {
+    const auto deadline = execution_deadline(max_duration_ms);
+    require_before_deadline(deadline);
     if (!model) throw std::invalid_argument("GGUF model is required");
     const auto& config = model->config();
     if (first_layer < 0 || last_layer < first_layer || last_layer >= config.layer_count) {
@@ -472,6 +718,9 @@ Qwen2GgufShard::Qwen2GgufShard(
     impl_->model = std::move(model);
     impl_->first = first_layer;
     impl_->last = last_layer;
+    if (graph_threads < 0 || graph_threads > 8) {
+        throw std::invalid_argument("Qwen2 graph thread count must be between 0 and 8");
+    }
     impl_->weights_context = create_context(4 * 1024 * 1024, true);
     impl_->weights.reserve(static_cast<size_t>(last_layer - first_layer + 1));
     impl_->cache.resize(static_cast<size_t>(last_layer - first_layer + 1));
@@ -479,33 +728,35 @@ Qwen2GgufShard::Qwen2GgufShard(
 
     const int32_t key_value_width =
         config.embedding_size / config.attention_heads * config.kv_heads;
+    const bool backend_owned = backend == InferenceBackend::Vulkan;
     for (int32_t layer = first_layer; layer <= last_layer; ++layer) {
+        require_before_deadline(deadline);
         const std::string prefix = "blk." + std::to_string(layer) + ".";
         Impl::LayerWeights layer_weights {
             model_impl.map_tensor(impl_->weights_context.get(), prefix + "attn_norm.weight",
-                config.embedding_size, 1),
+                config.embedding_size, 1, backend_owned),
             model_impl.map_tensor(impl_->weights_context.get(), prefix + "attn_q.weight",
-                config.embedding_size, config.embedding_size),
+                config.embedding_size, config.embedding_size, backend_owned),
             model_impl.map_optional_vector(impl_->weights_context.get(), prefix + "attn_q.bias",
-                config.embedding_size),
+                config.embedding_size, backend_owned),
             model_impl.map_tensor(impl_->weights_context.get(), prefix + "attn_k.weight",
-                config.embedding_size, key_value_width),
+                config.embedding_size, key_value_width, backend_owned),
             model_impl.map_optional_vector(impl_->weights_context.get(), prefix + "attn_k.bias",
-                key_value_width),
+                key_value_width, backend_owned),
             model_impl.map_tensor(impl_->weights_context.get(), prefix + "attn_v.weight",
-                config.embedding_size, key_value_width),
+                config.embedding_size, key_value_width, backend_owned),
             model_impl.map_optional_vector(impl_->weights_context.get(), prefix + "attn_v.bias",
-                key_value_width),
+                key_value_width, backend_owned),
             model_impl.map_tensor(impl_->weights_context.get(), prefix + "attn_output.weight",
-                config.embedding_size, config.embedding_size),
+                config.embedding_size, config.embedding_size, backend_owned),
             model_impl.map_tensor(impl_->weights_context.get(), prefix + "ffn_norm.weight",
-                config.embedding_size, 1),
+                config.embedding_size, 1, backend_owned),
             model_impl.map_tensor(impl_->weights_context.get(), prefix + "ffn_gate.weight",
-                config.embedding_size, config.feed_forward_size),
+                config.embedding_size, config.feed_forward_size, backend_owned),
             model_impl.map_tensor(impl_->weights_context.get(), prefix + "ffn_up.weight",
-                config.embedding_size, config.feed_forward_size),
+                config.embedding_size, config.feed_forward_size, backend_owned),
             model_impl.map_tensor(impl_->weights_context.get(), prefix + "ffn_down.weight",
-                config.feed_forward_size, config.embedding_size),
+                config.feed_forward_size, config.embedding_size, backend_owned),
         };
         const ggml_tensor* tensors[] = {
             layer_weights.attention_norm, layer_weights.query, layer_weights.key, layer_weights.value,
@@ -518,6 +769,10 @@ Qwen2GgufShard::Qwen2GgufShard(
         }
         impl_->weights.push_back(layer_weights);
     }
+    impl_->graph_executor.allocate_weights(
+        impl_->weights_context.get(),
+        [&model_impl](const ggml_tensor* tensor) { return model_impl.mapped_tensor_data(tensor); },
+        deadline);
 }
 
 Qwen2GgufShard::~Qwen2GgufShard() = default;
@@ -526,7 +781,10 @@ Qwen2GgufShard& Qwen2GgufShard::operator=(Qwen2GgufShard&&) noexcept = default;
 
 std::vector<float> Qwen2GgufShard::execute(
         const std::vector<float>& token_major_input,
-        int32_t token_offset) {
+        int32_t token_offset,
+        int64_t max_duration_ms) {
+    const auto deadline = execution_deadline(max_duration_ms);
+    require_before_deadline(deadline);
     const auto& config = impl_->model->config();
     if (token_major_input.empty() ||
         token_major_input.size() % static_cast<size_t>(config.embedding_size) != 0 ||
@@ -546,17 +804,47 @@ std::vector<float> Qwen2GgufShard::execute(
     const int32_t head_dimension = config.embedding_size / config.attention_heads;
     const size_t cache_append_size = static_cast<size_t>(head_dimension * config.kv_heads);
     for (size_t token = 0; token < token_count; ++token) {
+        require_before_deadline(deadline);
         const auto begin = token_major_input.begin() + token * config.embedding_size;
-        std::vector<float> activation(begin, begin + config.embedding_size);
+        const size_t layer_count = impl_->weights.size();
+        const size_t graph_memory_bytes = (layer_count + 1) * 32ULL * 1024ULL * 1024ULL;
+        auto graph_context = create_context(graph_memory_bytes);
+        auto* activation = ggml_new_tensor_1d(
+            graph_context.get(), GGML_TYPE_F32, config.embedding_size);
+        std::memcpy(activation->data, &*begin,
+            static_cast<size_t>(config.embedding_size) * sizeof(float));
         std::vector<std::vector<float>> pending_keys(impl_->cache.size());
         std::vector<std::vector<float>> pending_values(impl_->cache.size());
+        std::vector<ggml_tensor*> pending_key_tensors;
+        std::vector<ggml_tensor*> pending_value_tensors;
+        pending_key_tensors.reserve(layer_count);
+        pending_value_tensors.reserve(layer_count);
 
         for (size_t index = 0; index < impl_->weights.size(); ++index) {
-            const auto layer_result = impl_->execute_layer(impl_->weights[index], impl_->cache[index],
+            require_before_deadline(deadline);
+            const auto layer_result = impl_->build_layer(
+                graph_context.get(), impl_->weights[index], impl_->cache[index],
                 activation, impl_->token_count, config);
             activation = layer_result.activation;
-            pending_keys[index] = layer_result.rotated_key;
-            pending_values[index] = layer_result.value;
+            pending_key_tensors.push_back(layer_result.rotated_key);
+            pending_value_tensors.push_back(layer_result.value);
+        }
+
+        impl_->graph_executor.compute(graph_context.get(), activation, deadline);
+        std::vector<float> output_activation;
+        try {
+            output_activation = impl_->graph_executor.read_f32(activation, deadline);
+            for (size_t index = 0; index < layer_count; ++index) {
+                pending_keys[index] = impl_->graph_executor.read_f32(
+                    pending_key_tensors[index], deadline);
+                pending_values[index] = impl_->graph_executor.read_f32(
+                    pending_value_tensors[index], deadline);
+            }
+            impl_->graph_executor.finish();
+            require_before_deadline(deadline);
+        } catch (...) {
+            impl_->graph_executor.finish();
+            throw;
         }
 
         for (auto& layer_cache : impl_->cache) {
@@ -569,7 +857,7 @@ std::vector<float> Qwen2GgufShard::execute(
             layer_cache.values.insert(layer_cache.values.end(), pending_values[index].begin(), pending_values[index].end());
         }
 
-        result.insert(result.end(), activation.begin(), activation.end());
+        result.insert(result.end(), output_activation.begin(), output_activation.end());
         ++impl_->token_count;
     }
     return result;
@@ -589,6 +877,21 @@ int32_t Qwen2GgufShard::cached_tokens() const {
 
 size_t Qwen2GgufShard::mapped_weight_bytes() const {
     return impl_->weight_bytes;
+}
+
+bool Qwen2GgufShard::used_vulkan() const {
+    return impl_->graph_executor.used_vulkan();
+}
+
+BackendExecutionStats Qwen2GgufShard::backend_stats() const {
+    auto stats = impl_->graph_executor.stats();
+    for (const auto& layer : impl_->cache) {
+        stats.host_kv_bytes += static_cast<uint64_t>(
+            (layer.keys.size() + layer.values.size()) * sizeof(float));
+    }
+    // KV tensors remain host-resident until the multi-layer persistent graph migration is complete.
+    stats.gpu_kv_bytes = 0;
+    return stats;
 }
 
 int32_t Qwen2GgufShard::first_layer() const {

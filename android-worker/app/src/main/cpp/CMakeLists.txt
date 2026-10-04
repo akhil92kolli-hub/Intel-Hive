@@ -45,7 +45,7 @@ else()
   endif()
 endif()
 
-# Build the same source revision and CPU backend used by the host layer-range test.
+# Build the pinned llama.cpp revision with CPU fallback and Vulkan execution support.
 set(GGML_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 set(GGML_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
 set(LLAMA_BUILD_TESTS OFF CACHE BOOL "" FORCE)
@@ -61,8 +61,83 @@ set(GGML_BLAS OFF CACHE BOOL "" FORCE)
 set(GGML_NATIVE OFF CACHE BOOL "" FORCE)
 set(GGML_METAL OFF CACHE BOOL "" FORCE)
 set(GGML_CUDA OFF CACHE BOOL "" FORCE)
-set(GGML_VULKAN OFF CACHE BOOL "" FORCE)
+set(GGML_VULKAN ON CACHE BOOL "" FORCE)
+if(ANDROID AND (NOT Vulkan_GLSLC_EXECUTABLE OR
+    NOT EXISTS "${Vulkan_GLSLC_EXECUTABLE}"))
+  if(CMAKE_HOST_SYSTEM_NAME STREQUAL "Darwin")
+    set(INTELHIVE_NDK_HOST_TAG "darwin-x86_64")
+  elseif(CMAKE_HOST_SYSTEM_NAME STREQUAL "Linux")
+    set(INTELHIVE_NDK_HOST_TAG "linux-x86_64")
+  elseif(CMAKE_HOST_SYSTEM_NAME STREQUAL "Windows")
+    set(INTELHIVE_NDK_HOST_TAG "windows-x86_64")
+  endif()
+  if(DEFINED INTELHIVE_NDK_HOST_TAG)
+    set(INTELHIVE_NDK_GLSLC
+      "${CMAKE_ANDROID_NDK}/shader-tools/${INTELHIVE_NDK_HOST_TAG}/glslc")
+    if(CMAKE_HOST_SYSTEM_NAME STREQUAL "Windows")
+      set(INTELHIVE_NDK_GLSLC "${INTELHIVE_NDK_GLSLC}.exe")
+    endif()
+    if(EXISTS "${INTELHIVE_NDK_GLSLC}")
+      set(Vulkan_GLSLC_EXECUTABLE "${INTELHIVE_NDK_GLSLC}" CACHE FILEPATH
+        "glslc compiler bundled with the Android NDK" FORCE)
+    endif()
+  endif()
+endif()
+if(ANDROID AND CMAKE_HOST_SYSTEM_NAME STREQUAL "Darwin" AND NOT DEFINED SPIRV-Headers_DIR)
+  foreach(SPIRV_HEADERS_PREFIX "/opt/homebrew/opt/spirv-headers" "/usr/local/opt/spirv-headers")
+    set(SPIRV_HEADERS_CONFIG_DIR "${SPIRV_HEADERS_PREFIX}/share/cmake/SPIRV-Headers")
+    if(EXISTS "${SPIRV_HEADERS_CONFIG_DIR}/SPIRV-HeadersConfig.cmake")
+      set(SPIRV-Headers_DIR "${SPIRV_HEADERS_CONFIG_DIR}" CACHE PATH
+        "Host SPIRV-Headers CMake package used by the Android Vulkan shader build")
+      break()
+    endif()
+  endforeach()
+endif()
+if(ANDROID)
+  find_package(SPIRV-Headers CONFIG REQUIRED)
+endif()
+if(ANDROID)
+  find_path(INTELHIVE_VULKAN_HPP_INCLUDE_DIR
+    NAMES vulkan/vulkan.hpp
+    HINTS
+      /opt/homebrew/opt/vulkan-headers
+      /usr/local/opt/vulkan-headers
+      ENV VULKAN_SDK
+    PATH_SUFFIXES include
+    NO_CMAKE_FIND_ROOT_PATH
+  )
+  if(NOT INTELHIVE_VULKAN_HPP_INCLUDE_DIR)
+    message(FATAL_ERROR
+      "GGML Vulkan requires Vulkan-Headers with vulkan/vulkan.hpp; install the Vulkan-Headers package")
+  endif()
+endif()
+set(INTELHIVE_GGML_VULKAN_CMAKE
+  "${INTELHIVE_LLAMA_SOURCE_DIR}/ggml/src/ggml-vulkan/CMakeLists.txt")
+file(READ "${INTELHIVE_GGML_VULKAN_CMAKE}" INTELHIVE_GGML_VULKAN_CMAKE_CONTENT)
+set(INTELHIVE_GLSLC_PROBE_OLD [=[if (${glslc_error} MATCHES]=])
+set(INTELHIVE_GLSLC_PROBE_FIXED
+  [=[if (NOT glslc_result EQUAL 0 OR "${glslc_error}${glslc_output}" MATCHES]=])
+string(FIND "${INTELHIVE_GGML_VULKAN_CMAKE_CONTENT}"
+  "${INTELHIVE_GLSLC_PROBE_OLD}" INTELHIVE_GLSLC_PROBE_OLD_INDEX)
+if(NOT INTELHIVE_GLSLC_PROBE_OLD_INDEX EQUAL -1)
+  string(REPLACE "${INTELHIVE_GLSLC_PROBE_OLD}" "${INTELHIVE_GLSLC_PROBE_FIXED}"
+    INTELHIVE_GGML_VULKAN_CMAKE_CONTENT "${INTELHIVE_GGML_VULKAN_CMAKE_CONTENT}")
+  string(REPLACE "ERROR_VARIABLE glslc_error\n"
+    "ERROR_VARIABLE glslc_error\n        RESULT_VARIABLE glslc_result\n"
+    INTELHIVE_GGML_VULKAN_CMAKE_CONTENT "${INTELHIVE_GGML_VULKAN_CMAKE_CONTENT}")
+  file(WRITE "${INTELHIVE_GGML_VULKAN_CMAKE}"
+    "${INTELHIVE_GGML_VULKAN_CMAKE_CONTENT}")
+elseif(NOT INTELHIVE_GGML_VULKAN_CMAKE_CONTENT MATCHES
+    "glslc_result EQUAL 0 OR.*glslc_error.*glslc_output")
+  message(FATAL_ERROR
+    "Pinned GGML Vulkan GLSL extension probe has an unexpected format; refusing an unreliable Vulkan build")
+endif()
 add_subdirectory("${INTELHIVE_LLAMA_SOURCE_DIR}" llama.cpp)
+if(TARGET ggml-vulkan)
+  target_link_libraries(ggml-vulkan PRIVATE SPIRV-Headers::SPIRV-Headers)
+  target_include_directories(ggml-vulkan SYSTEM PRIVATE
+    "${INTELHIVE_VULKAN_HPP_INCLUDE_DIR}")
+endif()
 
 add_library(intelhive_layer_range STATIC
   "${INTELHIVE_LAYER_RANGE_DIR}/layer_range.cpp"
@@ -72,6 +147,15 @@ target_include_directories(intelhive_layer_range PUBLIC
   "${INTELHIVE_LLAMA_SOURCE_DIR}/ggml/include"
   "${INTELHIVE_LLAMA_SOURCE_DIR}/ggml/src")
 target_link_libraries(intelhive_layer_range PUBLIC ggml ggml-cpu llama)
+if(GGML_VULKAN)
+  target_compile_definitions(intelhive_layer_range PRIVATE INTELHIVE_HAS_VULKAN=1)
+  target_link_libraries(intelhive_layer_range PUBLIC ggml-vulkan)
+endif()
 
 add_library(intelhive_jni SHARED intelhive_jni.cpp)
-target_link_libraries(intelhive_jni PRIVATE intelhive_layer_range llama android log)
+find_library(VULKAN_LIBRARY vulkan REQUIRED)
+target_link_libraries(intelhive_jni PRIVATE intelhive_layer_range llama android log ${VULKAN_LIBRARY})
+if(GGML_VULKAN)
+  target_compile_definitions(intelhive_jni PRIVATE INTELHIVE_HAS_VULKAN=1)
+  target_link_libraries(intelhive_jni PRIVATE ggml-vulkan)
+endif()

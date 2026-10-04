@@ -3,7 +3,7 @@ package com.intellihive.worker.inference
 import java.util.UUID
 
 private const val MAX_PREFILL_TOKENS = 4096
-private const val MAX_GENERATED_TOKENS = 256
+private const val MAX_GENERATED_TOKENS = 4096
 
 data class BenchmarkExecutionPass(
     val passOrdinal: Int,
@@ -14,10 +14,12 @@ data class BenchmarkExecutionPass(
 
 fun benchmarkExecutionPasses(
     prefillTokens: Int,
-    generatedTokens: Int
+    generatedTokens: Int,
+    prefillChunkTokens: Int = prefillTokens
 ): List<BenchmarkExecutionPass> {
     require(prefillTokens > 0) { "prefillTokens must be greater than zero" }
     require(generatedTokens > 0) { "generatedTokens must be greater than zero" }
+    require(prefillChunkTokens > 0) { "prefillChunkTokens must be greater than zero" }
     require(prefillTokens <= MAX_PREFILL_TOKENS) {
         "prefillTokens must not exceed $MAX_PREFILL_TOKENS"
     }
@@ -25,12 +27,18 @@ fun benchmarkExecutionPasses(
         "generatedTokens must not exceed $MAX_GENERATED_TOKENS"
     }
     Math.addExact(prefillTokens, generatedTokens)
-    return buildList(generatedTokens + 1) {
-        add(BenchmarkExecutionPass(0, ExecutionMode.PREFILL, 0, prefillTokens))
+    val prefillPassCount = (prefillTokens + prefillChunkTokens - 1) / prefillChunkTokens
+    return buildList(generatedTokens + prefillPassCount) {
+        var prefillOffset = 0
+        while (prefillOffset < prefillTokens) {
+            val chunkSize = minOf(prefillChunkTokens, prefillTokens - prefillOffset)
+            add(BenchmarkExecutionPass(size, ExecutionMode.PREFILL, prefillOffset, chunkSize))
+            prefillOffset += chunkSize
+        }
         repeat(generatedTokens) { index ->
             add(
                 BenchmarkExecutionPass(
-                    passOrdinal = index + 1,
+                    passOrdinal = size,
                     mode = ExecutionMode.DECODE,
                     kvTokenOffset = Math.addExact(prefillTokens, index),
                     tokenCount = 1
@@ -47,8 +55,15 @@ data class NativeShardBenchmarkResult(
     val tokensPerSecond: Double,
     val prefillSpeedTokensPerSecond: Double,
     val generationSpeedTokensPerSecond: Double,
-    val layerRanges: List<ModelShardRange>
+    val decodePassLatenciesNanos: List<Long>,
+    val layerRanges: List<ModelShardRange>,
+    val safetyLimitReached: Boolean
 )
+
+/** Optional native control used by benchmarks without leaking deadlines into the execution DTO. */
+interface NativeExecutionDeadlineController {
+    fun setExecutionDeadlineNanos(deadlineNanos: Long?)
+}
 
 class NativeShardBenchmarkEngine(
     private val executor: NativeShardExecutor,
@@ -57,8 +72,13 @@ class NativeShardBenchmarkEngine(
     suspend fun run(
         prefillTokens: Int,
         generatedTokens: Int,
+        stopAfterMs: Long? = null,
+        shouldStop: () -> Boolean = { false },
         onPassCompleted: (completed: Int, total: Int) -> Unit = { _, _ -> }
     ): NativeShardBenchmarkResult {
+        require(stopAfterMs == null || stopAfterMs > 0L) {
+            "stopAfterMs must be greater than zero"
+        }
         require(ranges.isNotEmpty()) { "benchmark requires at least one model shard" }
         require(ranges.first().layerStart == 0) { "benchmark shard chain must start at layer zero" }
         ranges.zipWithNext().forEach { (previous, next) ->
@@ -70,15 +90,33 @@ class NativeShardBenchmarkEngine(
             "benchmark shard chain must cover all 36 Qwen2.5-3B layers"
         }
 
-        val passes = benchmarkExecutionPasses(prefillTokens, generatedTokens)
+        val passes = benchmarkExecutionPasses(
+            prefillTokens = prefillTokens,
+            generatedTokens = generatedTokens,
+            prefillChunkTokens = PREFILL_CHUNK_TOKENS
+        )
         val sequenceId = "benchmark-${UUID.randomUUID()}"
         val allStart = System.nanoTime()
+        val deadlineNanos = stopAfterMs?.let { durationMs ->
+            Math.addExact(allStart, Math.multiplyExact(durationMs, NANOS_PER_MILLISECOND))
+        }
+        val deadlineController = executor as? NativeExecutionDeadlineController
+        deadlineController?.setExecutionDeadlineNanos(deadlineNanos)
         var prefillElapsedNanos = 0L
         var generationElapsedNanos = 0L
+        val decodePassLatenciesNanos = mutableListOf<Long>()
         var nextInputToken = BENCHMARK_TOKEN_ID
+        var completedGeneratedTokens = 0
+        var safetyLimitReached = false
         var completed = false
         try {
-            passes.forEachIndexed { passIndex, pass ->
+            for ((passIndex, pass) in passes.withIndex()) {
+                if (stopAfterMs != null &&
+                    (System.nanoTime() - allStart) / NANOS_PER_MILLISECOND >= stopAfterMs
+                ) {
+                    safetyLimitReached = true
+                    break
+                }
                 val passStart = System.nanoTime()
                 var input: ExecutionInput = if (pass.mode == ExecutionMode.PREFILL) {
                     ExecutionInput.TokenIDs(List(pass.tokenCount) { BENCHMARK_TOKEN_ID })
@@ -126,27 +164,43 @@ class NativeShardBenchmarkEngine(
                 }
                 val passElapsed = System.nanoTime() - passStart
                 if (pass.mode == ExecutionMode.PREFILL) {
-                    prefillElapsedNanos = passElapsed
+                    prefillElapsedNanos += passElapsed
                 } else {
                     generationElapsedNanos += passElapsed
+                    completedGeneratedTokens++
+                    decodePassLatenciesNanos += passElapsed
                 }
-                onPassCompleted(passIndex + 1, passes.size)
+                onPassCompleted(completedGeneratedTokens, passes.size)
+                if (shouldStop()) break
+                if (stopAfterMs != null &&
+                    (System.nanoTime() - allStart) / NANOS_PER_MILLISECOND >= stopAfterMs &&
+                    passIndex < passes.lastIndex
+                ) {
+                    safetyLimitReached = true
+                    break
+                }
             }
             completed = true
         } finally {
-            executor.endSequence(sequenceId, sequenceId, completed)
+            try {
+                executor.endSequence(sequenceId, sequenceId, completed)
+            } finally {
+                deadlineController?.setExecutionDeadlineNanos(null)
+            }
         }
 
         val totalElapsedNanos = System.nanoTime() - allStart
         val totalElapsedMs = (totalElapsedNanos / NANOS_PER_MILLISECOND).coerceAtLeast(1)
         return NativeShardBenchmarkResult(
             prefillTokens = prefillTokens,
-            generatedTokens = generatedTokens,
+            generatedTokens = completedGeneratedTokens,
             totalTimeMs = totalElapsedMs,
-            tokensPerSecond = rate(prefillTokens + generatedTokens, totalElapsedNanos),
+            tokensPerSecond = rate(prefillTokens + completedGeneratedTokens, totalElapsedNanos),
             prefillSpeedTokensPerSecond = rate(prefillTokens, prefillElapsedNanos),
-            generationSpeedTokensPerSecond = rate(generatedTokens, generationElapsedNanos),
-            layerRanges = ranges
+            generationSpeedTokensPerSecond = rate(completedGeneratedTokens, generationElapsedNanos),
+            decodePassLatenciesNanos = decodePassLatenciesNanos,
+            layerRanges = ranges,
+            safetyLimitReached = safetyLimitReached
         )
     }
 
@@ -154,6 +208,7 @@ class NativeShardBenchmarkEngine(
         if (elapsedNanos > 0L) tokens * NANOS_PER_SECOND / elapsedNanos else 0.0
 
     companion object {
+        private const val PREFILL_CHUNK_TOKENS = 1
         private const val BENCHMARK_TOKEN_ID = 1L
         private const val NANOS_PER_SECOND = 1_000_000_000.0
         private const val NANOS_PER_MILLISECOND = 1_000_000L

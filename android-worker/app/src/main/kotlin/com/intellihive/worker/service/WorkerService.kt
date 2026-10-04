@@ -21,6 +21,8 @@ import com.intellihive.worker.MainActivity
 import com.intellihive.worker.benchmark.BenchmarkReadiness
 import com.intellihive.worker.benchmark.BenchmarkReadinessStore
 import com.intellihive.worker.benchmark.BenchmarkStatus
+import com.intellihive.worker.benchmark.AndroidDeviceTelemetry
+import com.intellihive.worker.inference.HybridInferenceController
 import com.intellihive.worker.inference.QwenShardCatalog
 import com.intellihive.worker.inference.NativeLayerRangeShardExecutor
 import com.intellihive.worker.inference.NativeRuntime
@@ -61,6 +63,9 @@ class WorkerService : Service() {
     private var shardCatalogPrepared = false
     private val assignmentExecutorLock = Any()
     private var assignmentExecutor: ShardExecutor? = null
+    private var nativeExecutor: NativeLayerRangeShardExecutor? = null
+    private var hybridController: HybridInferenceController? = null
+    private lateinit var deviceTelemetry: AndroidDeviceTelemetry
     private val executionMutex = Mutex()
     private val activeAssignments = HashSet<String>()
 
@@ -91,7 +96,7 @@ class WorkerService : Service() {
         }
 
         initializationJob = serviceScope.launch {
-            var nativeExecutor: NativeLayerRangeShardExecutor? = null
+            var initializingExecutor: NativeLayerRangeShardExecutor? = null
             try {
                 check(!isAppServiceRunning(this@WorkerService, BenchmarkService::class.java)) {
                     "Stop the benchmark before connecting the worker"
@@ -114,12 +119,21 @@ class WorkerService : Service() {
                 check(NativeRuntime.isAvailable()) {
                     "Native engine unavailable: ${NativeRuntime.unavailableReason()}"
                 }
-                nativeExecutor = NativeLayerRangeShardExecutor(this@WorkerService)
-                nativeExecutor.prepareModel()
-                nativeExecutor.prepareShards(QwenShardCatalog.ranges)
+                deviceTelemetry = AndroidDeviceTelemetry(this@WorkerService)
+                initializingExecutor = NativeLayerRangeShardExecutor(this@WorkerService)
+                val executor = initializingExecutor
+                executor.prepareModel()
+                val controller = HybridInferenceController(benchmarkReadiness) { placement ->
+                    executor.configureGraphThreads(placement.cpuThreads)
+                    executor.configureShardBackends(placement.profile.vulkanShardIds)
+                }
+                controller.initialize(deviceTelemetry.runtimeSafetySnapshot())
+                executor.prepareShards(QwenShardCatalog.ranges)
+                nativeExecutor = executor
+                hybridController = controller
                 shardCatalogPrepared = true
                 synchronized(assignmentExecutorLock) {
-                    assignmentExecutor = NativeTransportShardExecutor(nativeExecutor)
+                    assignmentExecutor = NativeTransportShardExecutor(executor)
                 }
                 reportProgress("Verified model and native engine ready; connecting to scheduler")
 
@@ -129,10 +143,10 @@ class WorkerService : Service() {
                 client = httpClient
                 socket = httpClient.newWebSocket(request, WorkerSocketListener())
             } catch (error: kotlinx.coroutines.CancellationException) {
-                nativeExecutor?.close()
+                initializingExecutor?.close()
                 throw error
             } catch (error: Exception) {
-                nativeExecutor?.close()
+                initializingExecutor?.close()
                 Log.e(TAG, "Worker model preparation failed", error)
                 reportStatus(
                     "Worker could not become ready: ${error.message ?: "model setup failed"}",
@@ -159,6 +173,9 @@ class WorkerService : Service() {
             (assignmentExecutor as? AutoCloseable)?.close()
             assignmentExecutor = null
         }
+        nativeExecutor?.close()
+        nativeExecutor = null
+        hybridController = null
         if (wasConnected && !terminalStatusReported) {
             reportStatus("Worker disconnected", connected = false)
         }
@@ -286,6 +303,10 @@ class WorkerService : Service() {
         serviceScope.launch {
             try {
                 executionMutex.withLock {
+                    hybridController?.beginSequence(
+                        assignment.sequenceId,
+                        deviceTelemetry.runtimeSafetySnapshot()
+                    )
                     val result = assignmentExecutor().execute(assignment)
                     validateExecutionResult(assignment, result)?.let { error ->
                         throw IllegalStateException(error)
@@ -314,6 +335,16 @@ class WorkerService : Service() {
                 throw error
             } catch (error: Exception) {
                 Log.e(TAG, "Shard execution failed for ${assignment.assignmentId}", error)
+                executionMutex.withLock {
+                    runCatching {
+                        assignmentExecutor?.endSequence(
+                            assignment.jobId,
+                            assignment.sequenceId,
+                            completed = false
+                        )
+                    }
+                    hybridController?.failSequence(assignment.sequenceId)
+                }
                 sendAssignmentFailure(
                     webSocket,
                     assignment,
@@ -342,6 +373,7 @@ class WorkerService : Service() {
             try {
                 executionMutex.withLock {
                     assignmentExecutor?.endSequence(jobId, sequenceId, completed)
+                    hybridController?.endSequence(sequenceId)
                 }
             } catch (error: kotlinx.coroutines.CancellationException) {
                 throw error
@@ -432,6 +464,9 @@ class WorkerService : Service() {
         val charging = chargingStatus == BatteryManager.BATTERY_STATUS_CHARGING ||
             chargingStatus == BatteryManager.BATTERY_STATUS_FULL
 
+        val selectedPlan = hybridController?.selectedPlan()
+        val verifiedPlans = hybridController?.verifiedPlans().orEmpty()
+        val vulkanCapable = verifiedPlans.any { it.profile.vulkanShardIds.isNotEmpty() }
         val payload = JSONObject()
             .put("protocol_version", PROTOCOL_VERSION)
             .put("worker_id", workerId)
@@ -444,12 +479,30 @@ class WorkerService : Service() {
                 .put("available_mb", memory.availMem / BYTES_PER_MB))
             .put("compute", JSONObject()
                 .put("cpu", JSONObject().put("available", true))
-                .put("gpu", JSONObject().put("available", false))
+                .put("gpu", JSONObject().put("available", vulkanCapable))
                 .put("npu", JSONObject().put("available", false)))
             .put("inference", JSONObject()
                 .put("runtime", "llama.cpp")
-                .put("backend", "cpu")
+                .put("backend", selectedPlan?.profileId ?: "cpu_only")
                 .put("benchmark_status", benchmarkReadiness.status.name)
+                .put("benchmark_version", benchmarkReadiness.benchmarkVersion)
+                .put("selected_placement", selectedPlan?.profileId ?: "cpu_only")
+                .put("cpu_threads", selectedPlan?.cpuThreads ?: 4)
+                .put("verified_profiles", org.json.JSONArray(
+                    verifiedPlans.map { it.profileId }
+                ))
+                .put("shard_backends", JSONObject().apply {
+                    QwenShardCatalog.ranges.forEach { range ->
+                        put(
+                            range.shardId,
+                            if (range.shardId in (selectedPlan?.profile?.vulkanShardIds ?: emptySet())) {
+                                "vulkan"
+                            } else {
+                                "cpu"
+                            }
+                        )
+                    }
+                })
                 .apply {
                     benchmarkReadiness.tokensPerSecond?.let { tokensPerSecond ->
                         put(
